@@ -24,7 +24,12 @@
 #     of the format block is honored (frame headers carry a 4th word), and
 #     SHM control messages are consumed as 24 bytes (6 words) instead of 20,
 #   - the "inline" transport spelling replaces "tcp" ("tcp" is still
-#     accepted as an alias); comments and messages translated to English.
+#     accepted as an alias); comments and messages translated to English,
+#   - the handshake declares the stream's REAL resolution parsed from the
+#     H.264/HEVC SPS (upstream fell back to 1920x1080): the declared size
+#     caps MediaCodec's adaptive-playback (max(w,1920) x max(h,1088)), so a
+#     stream exceeding it (e.g. an 810x1440 portrait clip) silently decodes
+#     to zero frames.
 # ******************************************************************************
 """
 Minimal reference implementation - verifies the termux-va wire protocol (v3).
@@ -142,13 +147,199 @@ def split_ivf(data):
 def guess_size(units, codec):
     """Roughly extract the resolution for the handshake declaration.
 
-    The daemon returns the real size on FORMAT_CHANGED, so being wrong here
-    does not affect correctness.  The IVF header carries the exact size; for
-    Annex B we would have to parse the SPS - not worth it, fall back to 1080p.
+    Superseded by parse_stream_size() (SPS parsing) for Annex B streams;
+    kept as the fallback when no SPS can be parsed.
     """
     if codec in ("vp9", "vp8"):
         return None                    # caller reads the IVF header
     return (1920, 1080)
+
+
+class BitReader:
+    """MSB-first bit reader with Exp-Golomb decoding (H.264/HEVC SPS)."""
+
+    def __init__(self, data):
+        self.data = data
+        self.pos = 0                   # bit position
+
+    def u(self, n):
+        v = 0
+        for _ in range(n):
+            byte = self.data[self.pos >> 3]
+            v = (v << 1) | ((byte >> (7 - (self.pos & 7))) & 1)
+            self.pos += 1
+        return v
+
+    def ue(self):
+        zeros = 0
+        while self.u(1) == 0:
+            zeros += 1
+            if zeros > 32:
+                raise ValueError("corrupt exp-golomb code")
+        return (1 << zeros) - 1 + (self.u(zeros) if zeros else 0)
+
+    def se(self):
+        k = self.ue()
+        return (k + 1) // 2 if k % 2 else -(k // 2)
+
+
+def rbsp(nalu):
+    """Strip emulation prevention bytes (00 00 03 -> 00 00)."""
+    out = bytearray()
+    zeros = 0
+    for b in nalu:
+        if zeros >= 2 and b == 3:
+            zeros = 0
+            continue
+        zeros = zeros + 1 if b == 0 else 0
+        out.append(b)
+    return bytes(out)
+
+
+def nalu_payload(unit):
+    """Drop the Annex B start code (3 or 4 bytes) from a split unit."""
+    if unit[:4] == b"\x00\x00\x00\x01":
+        return unit[4:]
+    return unit[3:]
+
+
+def skip_scaling_list(br, size):
+    """Skip a H.264 scaling list (delta deltas in Exp-Golomb)."""
+    last, next_ = 8, 8
+    for _ in range(size):
+        if next_ != 0:
+            delta = br.se()
+            next_ = (last + delta + 256) % 256
+        last = next_ if next_ != 0 else last
+
+
+def parse_h264_sps(unit):
+    """Parse an H.264 SPS NALU into (width, height); None on failure."""
+    payload = rbsp(nalu_payload(unit))
+    if not payload or (payload[0] & 0x1f) != 7:
+        return None
+    br = BitReader(payload[1:])
+    try:
+        profile_idc = br.u(8)
+        br.u(8)                                # constraint flags
+        br.u(8)                                # level_idc
+        br.ue()                                # seq_parameter_set_id
+        chroma_format_idc = 1
+        if profile_idc in (100, 110, 122, 244, 44, 83, 86, 118, 128,
+                           138, 139, 134, 135):
+            chroma_format_idc = br.ue()
+            if chroma_format_idc == 3:
+                br.u(1)                        # separate_colour_plane_flag
+            br.ue()                            # bit_depth_luma_minus8
+            br.ue()                            # bit_depth_chroma_minus8
+            br.u(1)                            # qpprime_y_zero_transform_bypass
+            if br.u(1):                        # seq_scaling_matrix_present
+                lists = 8 if chroma_format_idc != 3 else 12
+                for _ in range(lists):
+                    if br.u(1):
+                        skip_scaling_list(br, 16 if _ < 6 else 64)
+        br.ue()                                # log2_max_frame_num_minus4
+        poc_type = br.ue()
+        if poc_type == 0:
+            br.ue()                            # log2_max_pic_order_cnt_lsb
+        elif poc_type == 1:
+            br.u(1)                            # delta_pic_order_always_zero
+            br.se()                            # offset_for_non_ref_pic
+            br.se()                            # offset_for_top_to_bottom
+            for _ in range(br.ue()):
+                br.se()                        # offset_for_ref_frame
+        br.ue()                                # max_num_ref_frames
+        br.u(1)                                # gaps_in_frame_num_value
+        width_mbs = br.ue() + 1
+        height_map_units = br.ue() + 1
+        frame_mbs_only = br.u(1)
+        if not frame_mbs_only:
+            br.u(1)                            # mb_adaptive_frame_field
+        br.u(1)                                # direct_8x8_inference
+        width = width_mbs * 16
+        height = (2 - frame_mbs_only) * height_map_units * 16
+        if br.u(1):                            # frame_cropping_flag
+            cl, cr, ct, cb = br.ue(), br.ue(), br.ue(), br.ue()
+            if chroma_format_idc == 0:
+                crop_x, crop_y = 1, 2 - frame_mbs_only
+            else:
+                sub_w, sub_h = (2, 2) if chroma_format_idc == 1 else \
+                               (2, 1) if chroma_format_idc == 2 else (1, 1)
+                crop_x, crop_y = sub_w, sub_h * (2 - frame_mbs_only)
+            width -= (cl + cr) * crop_x
+            height -= (ct + cb) * crop_y
+        return (width, height) if width > 0 and height > 0 else None
+    except (IndexError, ValueError):
+        return None
+
+
+def parse_hevc_sps(unit):
+    """Parse an HEVC SPS NALU into (width, height); None on failure."""
+    payload = rbsp(nalu_payload(unit))
+    if len(payload) < 2 or ((payload[0] >> 1) & 0x3f) != 33:
+        return None
+    br = BitReader(payload[2:])
+    try:
+        br.u(4)                                # sps_video_parameter_set_id
+        max_sub_layers = br.u(3) + 1
+        br.u(1)                                # temporal_id_nesting
+        # profile_tier_level(1, max_sub_layers - 1)
+        br.u(2)                                # general_profile_space
+        br.u(1)                                # general_tier_flag
+        br.u(5)                                # general_profile_idc
+        br.u(32)                               # compatibility flags
+        br.u(1)                                # progressive_source
+        br.u(1)                                # interlaced_source
+        br.u(1)                                # non_packed_constraint
+        br.u(1)                                # frame_only_constraint
+        br.u(44)                               # reserved
+        br.u(8)                                # general_level_idc
+        present = []
+        for _ in range(max_sub_layers - 1):
+            present.append((br.u(1), br.u(1)))
+        if max_sub_layers - 1 > 0:
+            for _ in range(8 - max_sub_layers):
+                br.u(2)                        # reserved_zero_2bits
+        for prof_present, level_present in present:
+            if prof_present:
+                br.u(88)                       # sub-layer profile
+            if level_present:
+                br.u(8)                        # sub-layer level_idc
+        br.ue()                                # sps_seq_parameter_set_id
+        chroma_format_idc = br.ue()
+        if chroma_format_idc == 3:
+            br.u(1)                            # separate_colour_plane_flag
+        width = br.ue()                        # pic_width_in_luma_samples
+        height = br.ue()                       # pic_height_in_luma_samples
+        if br.u(1):                            # conformance_window_flag
+            sub_w = 2 if chroma_format_idc == 1 else 1
+            sub_h = 2 if chroma_format_idc == 1 else 1
+            width -= (br.ue() + br.ue()) * sub_w
+            height -= (br.ue() + br.ue()) * sub_h
+        return (width, height) if width > 0 and height > 0 else None
+    except (IndexError, ValueError):
+        return None
+
+
+def parse_stream_size(units, codec):
+    """Scan the stream for the first parseable SPS and return its size.
+
+    The handshake size is a CONTRACT: the daemon configures MediaCodec with
+    adaptive-playback ceilings derived from it (max(w,1920) x max(h,1088)),
+    and a stream that exceeds the ceiling never produces a single frame -
+    an 810x1440 portrait stream declared as 1920x1080 decodes to exactly
+    zero frames.  Parsing the SPS therefore matters even though the daemon
+    re-reports the real size on FORMAT_CHANGED.
+    """
+    parsers = {"h264": parse_h264_sps, "hevc": parse_hevc_sps}
+    parse = parsers.get(codec)
+    if not parse:
+        return None
+    for unit in units:
+        size = parse(unit)
+        if size:
+            return size
+    return None
 
 
 def shm_attach(name):
@@ -309,7 +500,7 @@ def main():
         annexb = False
     else:
         units = split_annexb(data)
-        width, height = guess_size(units, codec)
+        width, height = parse_stream_size(units, codec) or guess_size(units, codec)
         annexb = True
 
     if not units:
