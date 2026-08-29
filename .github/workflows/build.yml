@@ -1,0 +1,84 @@
+name: Build termux-va
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "daemon/**"
+      - "common/**"
+      - "scripts/build-ndk.sh"
+      - ".github/workflows/build.yml"
+  pull_request:
+    paths:
+      - "daemon/**"
+      - "common/**"
+      - "scripts/build-ndk.sh"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-26.04
+
+    env:
+      # Pinned to the same NDK version as anland-termux (app/build.gradle).
+      ANDROID_NDK_VERSION: "29.0.14206865"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Select Android NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          NDK_HOME="$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION"
+          if [[ ! -d "$NDK_HOME" ]]; then
+            echo "Android NDK $ANDROID_NDK_VERSION not found at $NDK_HOME" >&2
+            echo "Installed NDK versions:" >&2
+            find "$ANDROID_HOME/ndk" -mindepth 1 -maxdepth 1 -type d -printf "  %f\n" >&2
+            exit 1
+          fi
+
+          {
+            echo "ANDROID_NDK=$NDK_HOME"
+            echo "ANDROID_NDK_HOME=$NDK_HOME"
+            echo "ANDROID_NDK_ROOT=$NDK_HOME"
+          } >> "$GITHUB_ENV"
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/build-ndk.sh
+          file build/termux-va
+
+      - name: Verify build shape
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The daemon must be an aarch64 PIE built against the pinned NDK.
+          file build/termux-va | grep -q "ARM aarch64"
+          file build/termux-va | grep -q "interpreter /system/bin/linker64"
+          file build/termux-va | grep -q "for Android 29"
+
+      - name: Checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd build
+          sha256sum termux-va | sort -k2 > sha256sums.txt
+          cat sha256sums.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: termux-va-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/termux-va
+            build/sha256sums.txt
+          retention-days: 90
