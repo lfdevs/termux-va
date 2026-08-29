@@ -41,7 +41,7 @@ or the upstream client/ reference implementation.
 Usage:
     python3 test_decode.py [endpoint] <file> [codec] [inline|shm]
 
-    endpoint: Unix socket path; omitted = auto-resolve like the daemon
+    endpoint: Unix socket path (must contain "/"); omitted = auto-resolve
               (TERMUX_VA_SOCKET > TERMUX_VA_SOCKET_DIR >
               $TMPDIR/termux-va/termux-va.sock)
     codec:    h264 (default) | hevc | vp9 | vp8
@@ -463,10 +463,11 @@ class Receiver:
 
 def main():
     args = [a for a in sys.argv[1:]]
-    # The endpoint is optional and must look like a socket path; a bare
-    # file argument that is a codec name means the endpoint was omitted.
+    # The endpoint argument is optional and must look like a path (contains
+    # "/"); anything else is a stream file or an option word.
     endpoint = None
-    if args and args[0] not in CODEC_IDS and args[0] not in ("inline", "shm", "tcp"):
+    if args and "/" in args[0] and args[0] not in CODEC_IDS \
+            and args[0] not in ("inline", "shm", "tcp"):
         endpoint = args.pop(0)
 
     if len(args) < 1:
@@ -493,6 +494,12 @@ def main():
         return 1
 
     data = open(path, "rb").read()
+
+    if data[4:8] == b"ftyp":
+        raise SystemExit(
+            "input is an MP4/ISOBMFF container, not a raw Annex B stream\n"
+            "demux it first:  ffmpeg -i %s -c:v copy -bsf:v h264_mp4toannexb"
+            " -f h264 out.h264  (and drop the audio stream if present)" % path)
 
     if codec in ("vp9", "vp8"):
         units = split_ivf(data)
