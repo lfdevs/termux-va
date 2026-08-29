@@ -1,0 +1,8 @@
+# Build outputs
+build/
+*.o
+*.d
+
+# Local scratch space (design docs, notes) - not tracked, same policy as
+# anland-termux
+.tmp/
