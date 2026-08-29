@@ -1,23 +1,14 @@
-# termux-va
+# Termux:VA
 
 MediaCodec hardware video decoding for Linux containers, served from Termux.
 
-`termux-va` is a Termux port of [droidspaces-media-decode](https://github.com/Re-s/droidspaces-media-decode):
-a small C daemon that receives H.264/HEVC/VP8/VP9 bitstreams over a Unix
-socket, decodes them with the Android MediaCodec API in hardware, and
-returns NV12 frames (inline, or zero-copy through a memfd slot pool).
-Applications inside a Linux container that shares Termux's tmp directory
-use it through the standard VA-API, without any modification: ffmpeg,
-Firefox and Chrome all work.
+`termux-va` is a Termux port of [DroidSpaces Media Decode Daemon](https://github.com/Re-s/droidspaces-media-decode): a small C daemon that receives H.264/HEVC/VP8/VP9 bitstreams over a Unix socket, decodes them with the Android MediaCodec API in hardware, and returns NV12 frames (inline, or zero-copy through a memfd slot pool). Applications inside a Linux container that shares Termux's tmp directory use it through the standard VA-API, without any modification: ffmpeg, Firefox and Chrome all work.
 
 > 中文文档：[README_zh.md](README_zh.md)
 
 ## How it fits together
 
-The porting model is the one established by
-[anland-termux](https://github.com/lfdevs/anland-termux): a Termux daemon,
-a Unix socket placed in the shared tmp directory, and a bridge on the
-container side.
+The porting model is the one established by [anland-termux](https://github.com/lfdevs/anland-termux): a Termux daemon, a Unix socket placed in the shared tmp directory, and a bridge on the container side.
 
 ```
    Linux container (proot --shared-tmp)                 Termux
@@ -30,16 +21,8 @@ container side.
         socket: /tmp/termux-va/termux-va.sock == Termux $TMPDIR/termux-va/
 ```
 
-- **Daemon (this repository)**: `daemon/termux-va.c`, a faithful port of
-  upstream `decode-daemon.c` with the TCP transport removed - it listens on
-  a path-based Unix socket only.  Built with NDK **29.0.14206865** (the
-  same version anland-termux pins), API 29, arm64-v8a.
-- **Mesa bridge (container side)**: lives in
-  [mesa-for-android-container](https://github.com/lfdevs/mesa-for-android-container),
-  branch `test/add-va-bridge` (`src/gallium/frontends/va/tva_*`).  The
-  upstream standalone pseudo VA-API driver is retired; the bridge speaks the
-  same wire protocol from inside Mesa's VA frontend.  The default socket it
-  probes is `/tmp/termux-va/termux-va.sock`.
+- **Daemon (this repository)**: `daemon/termux-va.c`, a faithful port of upstream `decode-daemon.c` with the TCP transport removed - it listens on a path-based Unix socket only.  Built with NDK **29.0.14206865** (the same version anland-termux pins), API 29, arm64-v8a.
+- **Mesa bridge (container side)**: lives in [mesa-for-android-container](https://github.com/lfdevs/mesa-for-android-container), branch `test/add-va-bridge` (`src/gallium/frontends/va/tva_*`).  The upstream standalone pseudo VA-API driver is retired; the bridge speaks the same wire protocol from inside Mesa's VA frontend.  The default socket it probes is `/tmp/termux-va/termux-va.sock`.
 
 ## Endpoint resolution
 
@@ -50,11 +33,7 @@ container side.
 | 3 | `TERMUX_VA_SOCKET_DIR` | directory; `termux-va.sock` is appended (both ends) |
 | 4 | default | `$TMPDIR/termux-va/termux-va.sock` |
 
-`$TMPDIR` falls back to `/tmp`, then `/data/data/com.termux/files/usr/tmp`;
-the adb-injected `/data/local/tmp` is treated as unset.  With
-`proot-distro --shared-tmp` the Termux default appears as
-`/tmp/termux-va/termux-va.sock` inside the container - one path, both
-worlds.
+`$TMPDIR` falls back to `/tmp`, then `/data/data/com.termux/files/usr/tmp`; the adb-injected `/data/local/tmp` is treated as unset.  With `proot-distro --shared-tmp` the Termux default appears as `/tmp/termux-va/termux-va.sock` inside the container - one path, both worlds.
 
 ## Build
 
@@ -82,8 +61,7 @@ vainfo
 ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi -i in.mp4 -f null -
 ```
 
-See [doc/deploy.md](doc/deploy.md) for the full deployment manual and
-[doc/protocol.md](doc/protocol.md) for the wire protocol.
+See [doc/deploy.md](doc/deploy.md) for the full deployment manual and [doc/protocol.md](doc/protocol.md) for the wire protocol.
 
 ## Repository layout
 
@@ -99,7 +77,4 @@ doc/                    Protocol and deployment documentation (English + Chinese
 
 ## License
 
-This project is licensed under **GPL-3.0** (see [LICENSE](LICENSE)).  It is
-based on [droidspaces-media-decode](https://github.com/Re-s/droidspaces-media-decode),
-which is licensed under the Apache License 2.0; every file derived from it
-carries a prominent modification notice as required by GPL-3.0 section 5.
+This project is licensed under **GPL-3.0** (see [LICENSE](LICENSE)).  It is based on [DroidSpaces Media Decode Daemon](https://github.com/Re-s/droidspaces-media-decode), which is licensed under the Apache License 2.0; every file derived from it carries a prominent modification notice as required by GPL-3.0 section 5.

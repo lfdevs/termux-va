@@ -5,14 +5,9 @@
 ## 前提条件
 
 - Android 10+（API 29）arm64 设备，装有 Termux。
-- 与 Termux 共享 tmp 目录的 Linux 容器：PRoot 用
-  `proot-distro login <distro> --shared-tmp`；chroot/LXC 把 `$PREFIX/tmp`
-  bind mount 到容器的 `/tmp`。**必须挂目录**，不要挂单个 socket 文件
-  （bind mount 绑的是 inode，daemon 每次启动都会重建 socket）。
-- 容器侧：由 `mesa-for-android-container` 仓库 `test/add-va-bridge` 分支
-  构建的 Mesa（含 `termux-va` VA 桥），以及 `libva2` 和 `vainfo`。
-- Termux 侧：仅在本机构建时需要 `clang` + `ndk-multilib`；发布 deb 自带
-  预编译二进制。
+- 与 Termux 共享 tmp 目录的 Linux 容器：PRoot 用 `proot-distro login <distro> --shared-tmp`；chroot/LXC 把 `$PREFIX/tmp` bind mount 到容器的 `/tmp`。**必须挂目录**，不要挂单个 socket 文件（bind mount 绑的是 inode，daemon 每次启动都会重建 socket）。
+- 容器侧：由 `mesa-for-android-container` 仓库 `test/add-va-bridge` 分支构建的 Mesa（含 `termux-va` VA 桥），以及 `libva2` 和 `vainfo`。
+- Termux 侧：仅在本机构建时需要 `clang` + `ndk-multilib`；发布 deb 自带预编译二进制。
 
 ## 安装 daemon
 
@@ -44,9 +39,7 @@ make -C daemon && make -C daemon install
 
 ### 方式 A：termux-services（推荐）
 
-termux-services（runsv）能让 daemon 在会话关闭后继续存活、崩溃后自动
-重启——这点很重要，因为 Termux 销毁服务时会清空 `$TMPDIR`，普通后台
-进程可能随会话一起被杀。
+termux-services（runsv）能让 daemon 在会话关闭后继续存活、崩溃后自动重启——这点很重要，因为 Termux 销毁服务时会清空 `$TMPDIR`，普通后台进程可能随会话一起被杀。
 
 ```sh
 pkg install termux-services
@@ -72,12 +65,9 @@ termux-va-stop         # 优雅停止
 termux-va-watchdog     # 每 5 秒探活，连续 5 次失败自动重启
 ```
 
-放在长驻会话里运行，或配合 termux-services。`tva-probe` 退出码 1/2/8
-会触发重启；退出码 7（端点 inode 不匹配）只告警——那是挂载/配置问题，
-重启 daemon 解决不了。
+放在长驻会话里运行，或配合 termux-services。`tva-probe` 退出码 1/2/8 会触发重启；退出码 7（端点 inode 不匹配）只告警——那是挂载/配置问题，重启 daemon 解决不了。
 
-daemon 启动时会重建 socket 目录，所以被清空的 `$TMPDIR` 会在下次启动时
-自愈。
+daemon 启动时会重建 socket 目录，所以被清空的 `$TMPDIR` 会在下次启动时自愈。
 
 ## 容器配置
 
@@ -87,11 +77,9 @@ daemon 启动时会重建 socket 目录，所以被清空的 `$TMPDIR` 会在下
    proot-distro login debian --shared-tmp
    ```
 
-   之后 daemon 的默认 socket `$TMPDIR/termux-va/termux-va.sock` 在容器内
-   就是 `/tmp/termux-va/termux-va.sock`。
+   之后 daemon 的默认 socket `$TMPDIR/termux-va/termux-va.sock` 在容器内就是 `/tmp/termux-va/termux-va.sock`。
 
-2. 安装容器侧 Mesa（`test/add-va-bridge` 分支构建产物，来自其 CI 的
-   tar.gz，装到 `/usr`），以及 libva 和工具：
+2. 安装容器侧 Mesa（`test/add-va-bridge` 分支构建产物，来自其 CI 的 tar.gz，装到 `/usr`），以及 libva 和工具：
 
    ```sh
    apt install libva2 vainfo
@@ -126,8 +114,7 @@ vainfo                                      # 5 个 profile、VAEntrypointVLD、
 ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi -i in.mp4 -f null -
 ```
 
-较新的骁龙平台预期性能（上游基线）：720p30 经 Unix socket 约 4 倍实时
-（4MB 缓冲）；SHM 模式相对内联为 daemon 省约 19% CPU。
+较新的骁龙平台预期性能（上游基线）：720p30 经 Unix socket 约 4 倍实时（4MB 缓冲）；SHM 模式相对内联为 daemon 省约 19% CPU。
 
 ## 故障排查
 

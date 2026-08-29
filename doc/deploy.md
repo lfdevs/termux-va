@@ -5,16 +5,9 @@
 ## Prerequisites
 
 - An Android 10+ (API 29) arm64 device with Termux installed.
-- A Linux container sharing Termux's tmp directory: PRoot via
-  `proot-distro login <distro> --shared-tmp`, or a chroot/LXC with
-  `$PREFIX/tmp` bind-mounted to the container's `/tmp`.  Mount the
-  **directory**, never the single socket file (a bind mount pins the
-  inode; the daemon re-creates the socket on every start).
-- Container side: Mesa built from `mesa-for-android-container` branch
-  `test/add-va-bridge` (which contains the `termux-va` VA bridge), plus
-  `libva2` and `vainfo`.
-- Termux side: `clang` + `ndk-multilib` only if building on-device; the
-  release deb carries prebuilt binaries.
+- A Linux container sharing Termux's tmp directory: PRoot via `proot-distro login <distro> --shared-tmp`, or a chroot/LXC with `$PREFIX/tmp` bind-mounted to the container's `/tmp`.  Mount the **directory**, never the single socket file (a bind mount pins the inode; the daemon re-creates the socket on every start).
+- Container side: Mesa built from `mesa-for-android-container` branch `test/add-va-bridge` (which contains the `termux-va` VA bridge), plus `libva2` and `vainfo`.
+- Termux side: `clang` + `ndk-multilib` only if building on-device; the release deb carries prebuilt binaries.
 
 ## Install the daemon
 
@@ -46,10 +39,7 @@ Installed files:
 
 ### Option A: termux-services (recommended)
 
-termux-services (runsv) keeps the daemon alive across session closes and
-restarts it on crash - important because Termux clears `$TMPDIR` when its
-service is destroyed, and because a plain background process may be killed
-with its session.
+termux-services (runsv) keeps the daemon alive across session closes and restarts it on crash - important because Termux clears `$TMPDIR` when its service is destroyed, and because a plain background process may be killed with its session.
 
 ```sh
 pkg install termux-services
@@ -75,13 +65,9 @@ termux-va-stop         # graceful shutdown
 termux-va-watchdog     # probes every 5s, restarts after 5 consecutive failures
 ```
 
-Run it from a long-lived session or together with termux-services.  Exit
-codes 1/2/8 of `tva-probe` trigger a restart; exit code 7 (endpoint inode
-mismatch) only warns - it is a mount/configuration problem that a restart
-cannot fix.
+Run it from a long-lived session or together with termux-services.  Exit codes 1/2/8 of `tva-probe` trigger a restart; exit code 7 (endpoint inode mismatch) only warns - it is a mount/configuration problem that a restart cannot fix.
 
-The daemon creates its socket directory on startup, so a wiped `$TMPDIR`
-self-heals on the next (re)start.
+The daemon creates its socket directory on startup, so a wiped `$TMPDIR` self-heals on the next (re)start.
 
 ## Container setup
 
@@ -91,18 +77,15 @@ self-heals on the next (re)start.
    proot-distro login debian --shared-tmp
    ```
 
-   The daemon's default socket `$TMPDIR/termux-va/termux-va.sock` then
-   appears as `/tmp/termux-va/termux-va.sock` inside the container.
+   The daemon's default socket `$TMPDIR/termux-va/termux-va.sock` then appears as `/tmp/termux-va/termux-va.sock` inside the container.
 
-2. Install the container-side Mesa build of branch `test/add-va-bridge`
-   (tar.gz from its CI, installed to `/usr`), plus libva and tools:
+2. Install the container-side Mesa build of branch `test/add-va-bridge` (tar.gz from its CI, installed to `/usr`), plus libva and tools:
 
    ```sh
    apt install libva2 vainfo
    ```
 
-3. Set the consumer environment (put it in the container shell profile or
-   the desktop-session launcher):
+3. Set the consumer environment (put it in the container shell profile or the desktop-session launcher):
 
    ```sh
    export LIBVA_DRIVER_NAME=termuxva   # select the megadriver's termuxva entry
@@ -131,9 +114,7 @@ vainfo                                      # 5 profiles, VAEntrypointVLD, NV12
 ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi -i in.mp4 -f null -
 ```
 
-Expected performance on a recent Snapdragon (upstream baseline): 720p30 at
-~4x realtime over the Unix socket with 4MB buffers; the SHM mode saves the
-daemon ~19% CPU versus inline.
+Expected performance on a recent Snapdragon (upstream baseline): 720p30 at ~4x realtime over the Unix socket with 4MB buffers; the SHM mode saves the daemon ~19% CPU versus inline.
 
 ## Troubleshooting
 
