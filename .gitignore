@@ -6,3 +6,4 @@ build/
 # Local scratch space (design docs, notes) - not tracked, same policy as
 # anland-termux
 .tmp/
+__pycache__/
