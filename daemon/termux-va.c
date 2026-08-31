@@ -1482,6 +1482,25 @@ static int ensure_parent_dirs(const char *path)
     return 0;
 }
 
+/* The daemon socket is intentionally reachable from a shared-tmp container.
+ * The file mode alone is insufficient: a Chroot user also needs execute/search
+ * permission on the containing directory.  Keep the sticky bit so another
+ * user cannot replace or remove the daemon's socket or lock file. */
+static int make_socket_parent_shared(const char *sock_path)
+{
+    char parent[512];
+    size_t len = strlen(sock_path);
+    if (len == 0 || len >= sizeof(parent))
+        return -1;
+    memcpy(parent, sock_path, len + 1);
+
+    char *slash = strrchr(parent, '/');
+    if (!slash || slash == parent)
+        return 0;
+    *slash = '\0';
+    return chmod(parent, 01777);
+}
+
 /* ------------------------------------------------------------------ main */
 static void usage(const char *prog)
 {
@@ -1730,6 +1749,13 @@ int main(int argc, char **argv)
      * chmod the directory/socket). */
     if (chmod(sock_path, 0666) < 0)
         dlog(1, "chmod %s warning: %s", sock_path, strerror(errno));
+    if (make_socket_parent_shared(sock_path) < 0) {
+        fprintf(stderr, "chmod shared socket directory for %s failed: %s\n",
+                sock_path, strerror(errno));
+        close(srv);
+        unlink(sock_path);
+        return 1;
+    }
 
     if (listen(srv, MAX_CLIENTS) < 0) {
         fprintf(stderr, "listen failed: %s\n", strerror(errno));

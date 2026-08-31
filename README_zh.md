@@ -57,9 +57,13 @@ proot-distro login debian --shared-tmp
 
 # 容器内（Mesa 来自 mesa-for-android-container 的 test/add-va-bridge 分支）：
 export LIBVA_DRIVER_NAME=termuxva
+export TERMUX_VA_BRIDGE=1
+export TERMUX_VA_GPU_BACKEND=kgsl  # KGSL Freedreno 路径
 vainfo
 ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi -i in.mp4 -f null -
 ```
+
+将 `TERMUX_VA_GPU_BACKEND` 改为 `sw` 可强制 Mesa 使用 llvmpipe 的 surface 和帧拷贝路径；这不会关闭 Termux daemon 中的 MediaCodec 解码。当前 Mesa bridge 对外声明 H.264 和 VP9 Profile 0；daemon 虽然也接受 HEVC 和 VP8，但 Mesa bridge 尚未声明这两个 codec。
 
 完整部署手册见 [doc/deploy_zh.md](doc/deploy_zh.md)，线路协议见 [doc/protocol_zh.md](doc/protocol_zh.md)。
 

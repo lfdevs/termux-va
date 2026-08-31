@@ -90,11 +90,11 @@ The daemon creates its socket directory on startup, so a wiped `$TMPDIR` self-he
    ```sh
    export LIBVA_DRIVER_NAME=termuxva   # select the megadriver's termuxva entry
    export TERMUX_VA_BRIDGE=1           # explicit bridge activation (auto-detect also works)
+   export TERMUX_VA_GPU_BACKEND=kgsl   # KGSL Freedreno path; use sw for llvmpipe
    # optional overrides:
    # export TERMUX_VA_SOCKET=/tmp/termux-va/termux-va.sock
    # export TERMUX_VA_SOCKET_DIR=/tmp/termux-va
    # export TERMUX_VA_DRM_DEVICE=/dev/dri/renderD128
-   # export TERMUX_VA_GPU_BACKEND=drm|kgsl|swrast
    ```
 
 ## End-to-end verification
@@ -108,7 +108,7 @@ python3 /data/data/com.termux/files/usr/libexec/termux-va/test_decode.py clip.h2
 python3 .../test_decode.py clip.h264 h264 shm   # zero-copy path
 
 # 3. VA-API visibility:
-vainfo                                      # 5 profiles, VAEntrypointVLD, NV12
+vainfo                                      # H.264 and VP9 profiles, VAEntrypointVLD, NV12
 
 # 4. Real decode:
 ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi -i in.mp4 -f null -

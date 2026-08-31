@@ -90,11 +90,11 @@ daemon 启动时会重建 socket 目录，所以被清空的 `$TMPDIR` 会在下
    ```sh
    export LIBVA_DRIVER_NAME=termuxva   # 选择 megadriver 的 termuxva 入口
    export TERMUX_VA_BRIDGE=1           # 显式启用桥（默认探测也可自动激活）
+   export TERMUX_VA_GPU_BACKEND=kgsl   # KGSL Freedreno 路径；使用 sw 切换到 llvmpipe
    # 可选覆盖：
    # export TERMUX_VA_SOCKET=/tmp/termux-va/termux-va.sock
    # export TERMUX_VA_SOCKET_DIR=/tmp/termux-va
    # export TERMUX_VA_DRM_DEVICE=/dev/dri/renderD128
-   # export TERMUX_VA_GPU_BACKEND=drm|kgsl|swrast
    ```
 
 ## 端到端验证
@@ -108,7 +108,7 @@ python3 /data/data/com.termux/files/usr/libexec/termux-va/test_decode.py clip.h2
 python3 .../test_decode.py clip.h264 h264 shm   # 零拷贝路径
 
 # 3. VA-API 可见性：
-vainfo                                      # 5 个 profile、VAEntrypointVLD、NV12
+vainfo                                      # H.264 和 VP9 profile、VAEntrypointVLD、NV12
 
 # 4. 真实解码：
 ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi -i in.mp4 -f null -
