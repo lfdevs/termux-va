@@ -50,7 +50,7 @@ make -C daemon
 
 ```sh
 # Termux 内：
-termux-va-start.sh                 # 或：termux-va [-v|-q] [--sock <路径|目录>]
+termux-va-start.sh                 # 或：termux-va [-v|-q] [-t] [--sock <路径|目录>]
 
 # 带 shared tmp 进入容器：
 proot-distro login debian --shared-tmp

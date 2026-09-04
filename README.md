@@ -50,7 +50,7 @@ make -C daemon
 
 ```sh
 # In Termux:
-termux-va-start.sh                 # or: termux-va [-v|-q] [--sock <path|dir>]
+termux-va-start.sh                 # or: termux-va [-v|-q] [-t] [--sock <path|dir>]
 
 # Enter the container with the shared tmp:
 proot-distro login debian --shared-tmp

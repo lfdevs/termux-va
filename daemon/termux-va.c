@@ -81,6 +81,8 @@
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <stddef.h>
+#include <sys/time.h>
+#include <time.h>
 #include <linux/memfd.h>
 #include <media/NdkMediaCodec.h>
 #include <media/NdkMediaFormat.h>
@@ -100,13 +102,36 @@
  * 0=quiet (errors only)  1=info (connections/session stats, default)
  * 2=debug (per-frame)
  *
+ * -t adds a local wall-clock timestamp to every emitted log line.
+ *
  * Per-frame logging must stay at level 2 and off by default: an early
  * version did fprintf + fflush per frame, synchronously hitting the disk,
  * which contributed measurably to the sys-time share.  At the default
  * level those calls are skipped entirely.
  */
 static int log_level = 1;
+static int log_timestamps = 0;
 static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void log_prefix(void)
+{
+    if (!log_timestamps)
+        return;
+
+    struct timeval tv;
+    struct tm tm;
+    if (gettimeofday(&tv, NULL) == 0 &&
+        localtime_r(&tv.tv_sec, &tm) != NULL) {
+        fprintf(stderr, "[%02d-%02d %02d:%02d:%02d.%03ld] ",
+                tm.tm_mon + 1, tm.tm_mday,
+                tm.tm_hour, tm.tm_min, tm.tm_sec,
+                (long)(tv.tv_usec / 1000));
+    } else {
+        /* A real device always has a usable realtime clock; retain the
+         * line-prefix contract even if a non-standard libc lacks one. */
+        fputs("[00-00 00:00:00.000] ", stderr);
+    }
+}
 
 static void dlog(int lvl, const char *fmt, ...)
 {
@@ -114,6 +139,7 @@ static void dlog(int lvl, const char *fmt, ...)
     pthread_mutex_lock(&log_lock);
     va_list ap;
     va_start(ap, fmt);
+    log_prefix();
     vfprintf(stderr, fmt, ap);
     va_end(ap);
     fputc('\n', stderr);
@@ -175,10 +201,9 @@ static void endpoint_probe(const char *sock_path)
         if (sscanf(fake, "%llu:%llu", &d, &i) == 2) {
             g_ep_dev = (uint64_t)d;
             g_ep_ino = (uint64_t)i;
-            fprintf(stderr, "[TEST-ONLY] endpoint override: dev=%llu ino=%llu\n",
-                    d, i);
+            dlog(1, "[TEST-ONLY] endpoint override: dev=%llu ino=%llu", d, i);
         } else {
-            fprintf(stderr, "[TEST-ONLY] DMD_TEST_FAKE_INO format is \"dev:ino\", ignored\n");
+            dlog(1, "[TEST-ONLY] DMD_TEST_FAKE_INO format is \"dev:ino\", ignored");
         }
     }
 }
@@ -1513,6 +1538,7 @@ static void usage(const char *prog)
         "                      every restart - prefer a directory).\n"
         "  -v                  Per-frame debug logging\n"
         "  -q                  Errors only\n"
+        "  -t                  Prefix each log line with a local timestamp\n"
         "  -h                  This help\n"
         "\n"
         "Endpoint resolution order:\n"
@@ -1542,6 +1568,7 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-v") == 0)      log_level = 2;
         else if (strcmp(argv[i], "-q") == 0) log_level = 0;
+        else if (strcmp(argv[i], "-t") == 0) log_timestamps = 1;
         else if (strcmp(argv[i], "--sock") == 0 && i + 1 < argc) {
             sock_arg = argv[++i];
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -1550,7 +1577,7 @@ int main(int argc, char **argv)
         } else {
             /* TVA: upstream accepted a positional TCP port here; the TCP
              * transport no longer exists. */
-            fprintf(stderr, "unknown argument: %s\n", argv[i]);
+            dlog(0, "unknown argument: %s", argv[i]);
             usage(argv[0]);
             return 1;
         }
@@ -1560,15 +1587,19 @@ int main(int argc, char **argv)
     signal(SIGTERM, on_signal);
     signal(SIGPIPE, SIG_IGN);
 
-    if (pipe(wakefd) < 0) { perror("pipe"); return 1; }
+    if (pipe(wakefd) < 0) {
+        int pipe_errno = errno;
+        dlog(0, "pipe: %s", strerror(pipe_errno));
+        return 1;
+    }
 
     /* Resolve the endpoint (see resolve_socket_path for the order). */
     char resolved[512];
     const char *sock_path = sock_arg ? sock_arg
                                      : resolve_socket_path(resolved, sizeof(resolved));
     if (!sock_path || !*sock_path) {
-        fprintf(stderr, "unable to determine the socket path: set --sock, "
-                        "TERMUX_VA_SOCKET, TERMUX_VA_SOCKET_DIR or TMPDIR\n");
+        dlog(0, "unable to determine the socket path: set --sock, "
+                "TERMUX_VA_SOCKET, TERMUX_VA_SOCKET_DIR or TMPDIR");
         return 1;
     }
 
@@ -1597,7 +1628,7 @@ int main(int argc, char **argv)
         size_t sl = strlen(sock_path);
         while (sl > 1 && sock_path[sl - 1] == '/') sl--;
         if (sl >= sizeof(sock_trimmed)) {
-            fprintf(stderr, "socket path too long\n");
+            dlog(0, "socket path too long");
             return 1;
         }
         memcpy(sock_trimmed, sock_path, sl);
@@ -1625,11 +1656,11 @@ int main(int argc, char **argv)
             int wants_dir = (strstr(sock_path, ".sock") == NULL);
             if (wants_dir) {
                 if (mkdir(sock_path, 0755) < 0 && errno != EEXIST) {
-                    fprintf(stderr,
-                            "cannot create directory %s: %s\n"
-                            "(if a plain socket file was intended, make the\n"
-                            " path end with .sock)\n",
-                            sock_path, strerror(errno));
+                    int mkdir_errno = errno;
+                    dlog(0, "cannot create directory %s: %s",
+                         sock_path, strerror(mkdir_errno));
+                    dlog(0, "(if a plain socket file was intended, make the");
+                    dlog(0, " path end with .sock)");
                     return 1;
                 }
                 snprintf(sock_in_dir, sizeof(sock_in_dir), "%s/%s",
@@ -1641,8 +1672,9 @@ int main(int argc, char **argv)
                 /* TVA: create missing parent directories so an env-provided
                  * .sock path in a fresh directory works on first start. */
                 if (ensure_parent_dirs(sock_path) < 0) {
-                    fprintf(stderr, "cannot create parent directories of %s: %s\n",
-                            sock_path, strerror(errno));
+                    int parent_errno = errno;
+                    dlog(0, "cannot create parent directories of %s: %s",
+                         sock_path, strerror(parent_errno));
                     return 1;
                 }
                 dlog(1, "WARNING: %s is a single socket file - its inode changes on"
@@ -1656,14 +1688,18 @@ int main(int argc, char **argv)
     /* Unix socket listener: path-based, not part of any net namespace,
      * shared with containers through the shared tmp directory. */
     srv = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (srv < 0) { perror("socket"); return 1; }
+    if (srv < 0) {
+        int socket_errno = errno;
+        dlog(0, "socket: %s", strerror(socket_errno));
+        return 1;
+    }
 
     struct sockaddr_un ua;
     memset(&ua, 0, sizeof(ua));
     ua.sun_family = AF_UNIX;
     if (strlen(sock_path) >= sizeof(ua.sun_path)) {
-        fprintf(stderr, "socket path too long (limit %zu): %s\n",
-                sizeof(ua.sun_path) - 1, sock_path);
+        dlog(0, "socket path too long (limit %zu): %s",
+             sizeof(ua.sun_path) - 1, sock_path);
         close(srv); return 1;
     }
     strncpy(ua.sun_path, sock_path, sizeof(ua.sun_path) - 1);
@@ -1706,17 +1742,19 @@ int main(int argc, char **argv)
     snprintf(lockpath, sizeof(lockpath), "%s.lock", sock_path);
     int lockfd = open(lockpath, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     if (lockfd < 0) {
-        fprintf(stderr, "cannot open lock file %s: %s\n",
-                lockpath, strerror(errno));
+        int lock_errno = errno;
+        dlog(0, "cannot open lock file %s: %s",
+             lockpath, strerror(lock_errno));
         close(srv);
         return 1;
     }
     if (flock(lockfd, LOCK_EX | LOCK_NB) < 0) {
-        if (errno == EWOULDBLOCK)
-            fprintf(stderr, "another instance is already serving %s, refusing to start\n", sock_path);
+        int flock_errno = errno;
+        if (flock_errno == EWOULDBLOCK)
+            dlog(0, "another instance is already serving %s, refusing to start", sock_path);
         else
-            fprintf(stderr, "flock %s failed: %s\n",
-                    lockpath, strerror(errno));
+            dlog(0, "flock %s failed: %s",
+                 lockpath, strerror(flock_errno));
         close(lockfd);
         close(srv);
         return 1;
@@ -1729,17 +1767,18 @@ int main(int argc, char **argv)
          * instance, safe to remove.
          * NOTE: this changes the inode; existing single-file bind mounts
          * must be remounted (directory mounts are unaffected). */
-        fprintf(stderr, "removing stale socket file %s"
-                        " (inode will change; single-file bind mounts need a remount)\n",
-                sock_path);
+        dlog(1, "removing stale socket file %s"
+                " (inode will change; single-file bind mounts need a remount)",
+             sock_path);
         unlink(sock_path);
     }
 
     if (bind(srv, (struct sockaddr *)&ua, sizeof(ua)) < 0) {
-        fprintf(stderr, "bind %s failed: %s\n", sock_path, strerror(errno));
-        if (errno == EACCES)
-            fprintf(stderr, "  hint: check the SELinux context of the parent directory; "
-                            "Termux app data directories are writable by the app itself\n");
+        int bind_errno = errno;
+        dlog(0, "bind %s failed: %s", sock_path, strerror(bind_errno));
+        if (bind_errno == EACCES)
+            dlog(0, "  hint: check the SELinux context of the parent directory; "
+                    "Termux app data directories are writable by the app itself");
         close(srv); return 1;
     }
     /* 0666 is deliberately permissive: PRoot containers share the Termux uid
@@ -1750,25 +1789,27 @@ int main(int argc, char **argv)
     if (chmod(sock_path, 0666) < 0)
         dlog(1, "chmod %s warning: %s", sock_path, strerror(errno));
     if (make_socket_parent_shared(sock_path) < 0) {
-        fprintf(stderr, "chmod shared socket directory for %s failed: %s\n",
-                sock_path, strerror(errno));
+        int chmod_errno = errno;
+        dlog(0, "chmod shared socket directory for %s failed: %s",
+             sock_path, strerror(chmod_errno));
         close(srv);
         unlink(sock_path);
         return 1;
     }
 
     if (listen(srv, MAX_CLIENTS) < 0) {
-        fprintf(stderr, "listen failed: %s\n", strerror(errno));
+        int listen_errno = errno;
+        dlog(0, "listen failed: %s", strerror(listen_errno));
         close(srv); unlink(sock_path); return 1;
     }
     /* Startup-success marker for external scripts; keep the format stable. */
-    fprintf(stderr, "listening on %s\n", sock_path);
+    dlog(1, "listening on %s", sock_path);
     /* Capture the endpoint identity for the handshake; TEST-ONLY hooks
      * apply here too.  This is the "server tells the truth" half of the
      * inode verification mechanism - the client reconciles against it. */
     endpoint_probe(sock_path);
-    fprintf(stderr, "listening endpoint: dev=%llu ino=%llu\n",
-            (unsigned long long)g_ep_dev, (unsigned long long)g_ep_ino);
+    dlog(1, "listening endpoint: dev=%llu ino=%llu",
+         (unsigned long long)g_ep_dev, (unsigned long long)g_ep_ino);
     fflush(stderr);
 
     int next_id = 1;
@@ -1784,7 +1825,9 @@ int main(int argc, char **argv)
         int sel = select(mx + 1, &rs, NULL, NULL, NULL);
         if (sel < 0) {
             if (errno == EINTR) continue;
-            perror("select"); break;
+            int select_errno = errno;
+            dlog(0, "select: %s", strerror(select_errno));
+            break;
         }
         if (FD_ISSET(wakefd[0], &rs)) break;          /* exit signal */
         if (!FD_ISSET(srv, &rs)) continue;
@@ -1819,8 +1862,11 @@ int main(int argc, char **argv)
                 /* EMFILE/ENFILE/ENOBUFS/ENOMEM may be transient too, but
                  * retrying in a loop becomes a busy-wait; restarting from
                  * outside is cleaner. */
-                perror("accept");
-                goto accept_loop_done;
+                {
+                    int accept_errno = errno;
+                    dlog(0, "accept: %s", strerror(accept_errno));
+                    goto accept_loop_done;
+                }
             }
         }
 
