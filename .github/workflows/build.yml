@@ -7,12 +7,14 @@ on:
     paths:
       - "daemon/**"
       - "common/**"
+      - "tools/tva-probe.c"
       - "scripts/build-ndk.sh"
       - ".github/workflows/build.yml"
   pull_request:
     paths:
       - "daemon/**"
       - "common/**"
+      - "tools/tva-probe.c"
       - "scripts/build-ndk.sh"
       - ".github/workflows/build.yml"
   workflow_dispatch:
@@ -55,23 +57,26 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/build-ndk.sh
-          file build/termux-va
+          file build/termux-va build/tva-probe
 
       - name: Verify build shape
         shell: bash
         run: |
           set -euo pipefail
-          # The daemon must be an aarch64 PIE built against the pinned NDK.
-          file build/termux-va | grep -q "ARM aarch64"
-          file build/termux-va | grep -q "interpreter /system/bin/linker64"
-          file build/termux-va | grep -q "for Android 29"
+          # Both binaries must be aarch64 PIE executables built against the
+          # pinned NDK.
+          for binary in build/termux-va build/tva-probe; do
+            file "$binary" | grep -q "ARM aarch64"
+            file "$binary" | grep -q "interpreter /system/bin/linker64"
+            file "$binary" | grep -q "for Android 29"
+          done
 
       - name: Checksums
         shell: bash
         run: |
           set -euo pipefail
           cd build
-          sha256sum termux-va | sort -k2 > sha256sums.txt
+          sha256sum termux-va tva-probe | sort -k2 > sha256sums.txt
           cat sha256sums.txt
 
       - name: Upload artifacts
@@ -80,5 +85,6 @@ jobs:
           name: termux-va-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             build/termux-va
+            build/tva-probe
             build/sha256sums.txt
           retention-days: 90

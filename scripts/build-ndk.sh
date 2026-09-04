@@ -6,7 +6,8 @@
 # this ecosystem are built with one toolchain.  Override ANDROID_NDK_HOME to
 # point at a different installation, but keep the version.
 #
-# Output: build/termux-va (aarch64 PIE, interpreter /system/bin/linker64).
+# Output: build/termux-va and build/tva-probe (aarch64 PIE,
+# interpreter /system/bin/linker64).
 
 set -euo pipefail
 
@@ -48,4 +49,13 @@ mkdir -p "$OUT_DIR"
     "$REPO_DIR/daemon/termux-va.c" \
     -lmediandk -llog -landroid
 
+# tva-probe only uses bionic/POSIX socket APIs, so it needs no Android
+# framework libraries beyond the libc supplied by the NDK toolchain.
+"$CC" \
+    -O2 -Wall -Wextra -std=c11 \
+    -I "$REPO_DIR/common" \
+    -o "$OUT_DIR/tva-probe" \
+    "$REPO_DIR/tools/tva-probe.c"
+
 echo "Built $OUT_DIR/termux-va"
+echo "Built $OUT_DIR/tva-probe"
