@@ -2,7 +2,7 @@
 
 MediaCodec hardware video decoding for Linux containers, served from Termux.
 
-`termux-va` is a Termux port of [DroidSpaces Media Decode Daemon](https://github.com/Re-s/droidspaces-media-decode): a small C daemon that receives H.264/HEVC/VP8/VP9 bitstreams over a Unix socket, decodes them with the Android MediaCodec API in hardware, and returns NV12 frames (inline, or zero-copy through a memfd slot pool). Applications inside a Linux container that shares Termux's tmp directory use it through the standard VA-API, without any modification: ffmpeg, Firefox and Chrome all work.
+`termux-va` is a Termux port of [DroidSpaces Media Decode Daemon](https://github.com/Re-s/droidspaces-media-decode/tree/143610b816da5c612c325a2170dbc5621b5ce1eb): a small C daemon that receives H.264/HEVC/VP8/VP9 bitstreams over a Unix socket, decodes them with the Android MediaCodec API in hardware, and returns NV12 frames (inline, or zero-copy through a memfd slot pool). Applications inside a Linux container that shares Termux's tmp directory use it through the standard VA-API, without any modification: ffmpeg, Firefox and Chrome all work.
 
 > 中文文档：[README_zh.md](README_zh.md)
 
@@ -81,4 +81,4 @@ doc/                    Protocol and deployment documentation (English + Chinese
 
 ## License
 
-This project is licensed under **GPL-3.0** (see [LICENSE](LICENSE)).  It is based on [DroidSpaces Media Decode Daemon](https://github.com/Re-s/droidspaces-media-decode), which is licensed under the Apache License 2.0; every file derived from it carries a prominent modification notice as required by GPL-3.0 section 5.
+This project is licensed under **GPL-3.0** (see [LICENSE](LICENSE)).  It is based on [DroidSpaces Media Decode Daemon](https://github.com/Re-s/droidspaces-media-decode/tree/143610b816da5c612c325a2170dbc5621b5ce1eb), which is licensed under the Apache License 2.0; every file derived from it carries a prominent modification notice as required by GPL-3.0 section 5.

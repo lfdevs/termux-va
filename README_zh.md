@@ -2,7 +2,7 @@
 
 从 Termux 向 Linux 容器提供 MediaCodec 硬件视频解码能力。
 
-`termux-va` 是 [DroidSpaces Media Decode Daemon](https://github.com/Re-s/droidspaces-media-decode) 的 Termux 移植版：一个小型 C 守护进程，通过 Unix socket 接收 H.264/HEVC/VP8/VP9 码流，用 Android MediaCodec API 硬件解码，回传 NV12 帧（内联传输，或经 memfd 槽位池零拷贝）。与 Termux 共享 tmp 目录的 Linux 容器内的应用通过标准 VA-API 使用它，无需任何改动：ffmpeg、Firefox、Chrome 均可用。
+`termux-va` 是 [DroidSpaces Media Decode Daemon](https://github.com/Re-s/droidspaces-media-decode/tree/143610b816da5c612c325a2170dbc5621b5ce1eb) 的 Termux 移植版：一个小型 C 守护进程，通过 Unix socket 接收 H.264/HEVC/VP8/VP9 码流，用 Android MediaCodec API 硬件解码，回传 NV12 帧（内联传输，或经 memfd 槽位池零拷贝）。与 Termux 共享 tmp 目录的 Linux 容器内的应用通过标准 VA-API 使用它，无需任何改动：ffmpeg、Firefox、Chrome 均可用。
 
 > English documentation: [README.md](README.md)
 
@@ -81,4 +81,4 @@ doc/                    协议与部署文档（中英双语）
 
 ## 许可证
 
-本项目以 **GPL-3.0** 授权（见 [LICENSE](LICENSE)）。它基于以 Apache License 2.0 授权的 [DroidSpaces Media Decode Daemon](https://github.com/Re-s/droidspaces-media-decode)；所有由其衍生的文件均按 GPL-3.0 第 5 条要求带有显著的修改声明。
+本项目以 **GPL-3.0** 授权（见 [LICENSE](LICENSE)）。它基于以 Apache License 2.0 授权的 [DroidSpaces Media Decode Daemon](https://github.com/Re-s/droidspaces-media-decode/tree/143610b816da5c612c325a2170dbc5621b5ce1eb)；所有由其衍生的文件均按 GPL-3.0 第 5 条要求带有显著的修改声明。
