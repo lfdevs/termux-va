@@ -1,6 +1,8 @@
 # termux-va Wire Protocol (DMD v3)
 
-> 中文版：[protocol_zh.md](protocol_zh.md)
+**English** | [中文](protocol_zh.md)
+
+---
 
 The wire format is byte-compatible with droidspaces-media-decode protocol v3 (`HELLO_MAGIC 0x444D4400`), so the upstream regression tools work unchanged.  The single source of truth for the constants is [`common/tva_protocol.h`](../common/tva_protocol.h), mirrored into the Mesa bridge (`src/gallium/frontends/va/tva_protocol.h`) and verified with `scripts/check-mirror.sh`.
 
@@ -17,7 +19,7 @@ The client sends 24 bytes before anything else:
 ```
 
 - `version`: protocol version, client-declared.  The daemon accepts `2..3` and takes the minimum.  Version semantics: v2 added SHM negotiation, v3 added the endpoint extension in the response.
-- `codec`: `0=H.264 (video/avc), 1=HEVC (video/hevc), 2=VP9, 3=VP8, 4=AV1` (AV1 accepted by the daemon, never requested by the bridge).
+- `codec`: `0=AVC (video/avc), 1=HEVC (video/hevc), 2=VP9, 3=VP8, 4=AV1` (AV1 accepted by the daemon, never requested by the bridge).
 - `width/height`: initial resolution; valid range 96x96..8192x4320.
 - `xfer`: requested frame-return transport, `0=inline`, `1=SHM`.
 
@@ -53,7 +55,7 @@ Before the first frame (and again after every output-format change), the daemon 
 
 Exactly one unit per length prefix:
 
-- H.264 / HEVC: a single Annex B NALU **with** its start code (3 or 4 bytes).  SPS/PPS (H.264 type 7/8, HEVC type 32/33/34) accumulate into the CSD and are submitted with `FLAG_CODEC_CONFIG`; they produce no frames.
+- AVC / HEVC: a single Annex B NALU **with** its start code (3 or 4 bytes).  SPS/PPS (AVC type 7/8, HEVC type 32/33/34) accumulate into the CSD and are submitted with `FLAG_CODEC_CONFIG`; they produce no frames.
 - VP8 / VP9: one whole frame, **without** start codes.
 - `length == 0`: reversible drain request (see below).
 - `length > 8MB (MAX_FRAME)`: protocol violation, session ends.

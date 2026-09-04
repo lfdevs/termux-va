@@ -1,6 +1,8 @@
 # termux-va Deployment Manual
 
-> 中文版：[deploy_zh.md](deploy_zh.md)
+**English** | [中文](deploy_zh.md)
+
+---
 
 ## Prerequisites
 
@@ -108,7 +110,7 @@ python3 /data/data/com.termux/files/usr/libexec/termux-va/test_decode.py clip.h2
 python3 .../test_decode.py clip.h264 h264 shm   # zero-copy path
 
 # 3. VA-API visibility:
-vainfo                                      # H.264 and VP9 profiles, VAEntrypointVLD, NV12
+vainfo                                      # AVC and VP9 profiles, VAEntrypointVLD, NV12
 
 # 4. Real decode:
 ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi -i in.mp4 -f null -

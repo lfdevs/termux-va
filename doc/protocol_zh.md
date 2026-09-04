@@ -1,6 +1,8 @@
 # termux-va 线路协议（DMD v3）
 
-> English version: [protocol.md](protocol.md)
+[English](protocol.md) | **中文**
+
+---
 
 线路格式与 droidspaces-media-decode 协议 v3（`HELLO_MAGIC 0x444D4400`）逐字节兼容，上游回归工具可直接使用。常量的唯一事实来源是 [`common/tva_protocol.h`](../common/tva_protocol.h)，该文件镜像到 Mesa 桥（`src/gallium/frontends/va/tva_protocol.h`）并用 `scripts/check-mirror.sh` 校验。
 
@@ -17,7 +19,7 @@
 ```
 
 - `version`：客户端声明的协议版本。daemon 接受 `2..3` 并取最小值。版本语义：v2 增加 SHM 协商，v3 在响应中增加 endpoint 扩展。
-- `codec`：`0=H.264 (video/avc), 1=HEVC (video/hevc), 2=VP9, 3=VP8, 4=AV1`（daemon 接受 AV1，但桥不会请求）。
+- `codec`：`0=AVC (video/avc), 1=HEVC (video/hevc), 2=VP9, 3=VP8, 4=AV1`（daemon 接受 AV1，但桥不会请求）。
 - `宽/高`：初始分辨率，有效范围 96x96..8192x4320。
 - `xfer`：请求的帧回传方式，`0=内联`，`1=SHM`。
 
@@ -53,7 +55,7 @@ daemon 回应变长消息：
 
 每个长度前缀只放一个单元：
 
-- H.264 / HEVC：单个带 Annex B 起始码（3 或 4 字节）的 NALU。SPS/PPS（H.264 type 7/8，HEVC type 32/33/34）累积为 CSD，以 `FLAG_CODEC_CONFIG` 送入，不产出帧。
+- AVC / HEVC：单个带 Annex B 起始码（3 或 4 字节）的 NALU。SPS/PPS（AVC type 7/8，HEVC type 32/33/34）累积为 CSD，以 `FLAG_CODEC_CONFIG` 送入，不产出帧。
 - VP8 / VP9：整帧，**不带**起始码。
 - `长度 == 0`：可逆排空请求（见下）。
 - `长度 > 8MB (MAX_FRAME)`：协议违规，会话结束。
