@@ -1342,8 +1342,12 @@ static void *session_thread(void *arg)
      * builds against API 29.  The key is just a string constant; writing
      * the literal avoids raising the build API and avoids weak-symbol
      * null checks.  On devices below API 30 MediaCodec ignores unknown
-     * keys - the pre-existing behavior, never a failure. */
-    AMediaFormat_setInt32(fmt, "low-latency", 1);
+     * keys - the pre-existing behavior, never a failure.
+     *
+     * DMD_NO_LOW_LATENCY=1 disables this key for decoder configuration
+     * diagnostics.  It is unset by default, preserving normal behavior. */
+    if (!getenv("DMD_NO_LOW_LATENCY"))
+        AMediaFormat_setInt32(fmt, "low-latency", 1);
 
     /* Make the decoder output in DECODE order instead of buffering for
      * display order.
@@ -1369,8 +1373,12 @@ static void *session_thread(void *arg)
      *
      * Literal string: this is a Qualcomm vendor extension, absent from NDK
      * headers.  Non-Qualcomm platforms ignore the unknown key - the
-     * pre-existing behavior, never a failure. */
-    AMediaFormat_setInt32(fmt, "vendor.qti-ext-dec-picture-order.enable", 1);
+     * pre-existing behavior, never a failure.
+     *
+     * DMD_NO_PICTURE_ORDER=1 disables this key for decoder configuration
+     * diagnostics.  It is unset by default, preserving normal behavior. */
+    if (!getenv("DMD_NO_PICTURE_ORDER"))
+        AMediaFormat_setInt32(fmt, "vendor.qti-ext-dec-picture-order.enable", 1);
 
     s->codec = AMediaCodec_createDecoderByType(s->mime);
     if (!s->codec) { dlog(0, "[%d] no available decoder: %s", s->id, s->mime); goto out_fmt; }
