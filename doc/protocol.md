@@ -19,7 +19,7 @@ The client sends 24 bytes before anything else:
 ```
 
 - `version`: protocol version, client-declared.  The daemon accepts `2..3` and takes the minimum.  Version semantics: v2 added SHM negotiation, v3 added the endpoint extension in the response.
-- `codec`: `0=AVC (video/avc), 1=HEVC (video/hevc), 2=VP9, 3=VP8, 4=AV1` (AV1 accepted by the daemon, never requested by the bridge).
+- `codec`: `0=AVC (video/avc), 1=HEVC (video/hevc), 2=VP9, 3=VP8, 4=AV1 (video/av01)`.
 - `width/height`: initial resolution; valid range 96x96..8192x4320.
 - `xfer`: requested frame-return transport, `0=inline`, `1=SHM`.
 
@@ -47,6 +47,8 @@ Before the first frame (and again after every output-format change), the daemon 
 
 `caps` bit 0 (`CAP_FRAME_PTS`): every following frame header carries a 4th word - the input unit index.  The buffer geometry reflects the decoder's real output (Qualcomm Venus aligns width to 128 / height to 32); the crop rectangle is the visible area.
 
+The daemon always exposes linear NV12 on the wire.  If MediaCodec returns planar YUV420 (for example AV1 `color-format=0x13`), it is converted before the frame is sent.
+
 ## Uplink units
 
 ```
@@ -57,6 +59,7 @@ Exactly one unit per length prefix:
 
 - AVC / HEVC: a single Annex B NALU **with** its start code (3 or 4 bytes).  SPS/PPS (AVC type 7/8, HEVC type 32/33/34) accumulate into the CSD and are submitted with `FLAG_CODEC_CONFIG`; they produce no frames.
 - VP8 / VP9: one whole frame, **without** start codes.
+- AV1: one complete temporal unit containing reconstructed OBU headers and tile groups; sequence headers may be included at the start of a key temporal unit.
 - `length == 0`: reversible drain request (see below).
 - `length > 8MB (MAX_FRAME)`: protocol violation, session ends.
 

@@ -19,7 +19,7 @@
 ```
 
 - `version`：客户端声明的协议版本。daemon 接受 `2..3` 并取最小值。版本语义：v2 增加 SHM 协商，v3 在响应中增加 endpoint 扩展。
-- `codec`：`0=AVC (video/avc), 1=HEVC (video/hevc), 2=VP9, 3=VP8, 4=AV1`（daemon 接受 AV1，但桥不会请求）。
+- `codec`：`0=AVC (video/avc), 1=HEVC (video/hevc), 2=VP9, 3=VP8, 4=AV1 (video/av01)。
 - `宽/高`：初始分辨率，有效范围 96x96..8192x4320。
 - `xfer`：请求的帧回传方式，`0=内联`，`1=SHM`。
 
@@ -47,6 +47,8 @@ daemon 回应变长消息：
 
 `能力位` bit 0（`CAP_FRAME_PTS`）：之后每个帧头都带第 4 个字——输入单元序号。缓冲几何反映解码器的真实输出（高通 Venus 宽按 128、高按 32 对齐）；crop 矩形是可见区域。
 
+daemon 在线路上始终提供线性 NV12。若 MediaCodec 返回平面式 YUV420（例如 AV1 的 `color-format=0x13`），会在发送帧之前转换为 NV12。
+
 ## 上行数据单元
 
 ```
@@ -57,6 +59,7 @@ daemon 回应变长消息：
 
 - AVC / HEVC：单个带 Annex B 起始码（3 或 4 字节）的 NALU。SPS/PPS（AVC type 7/8，HEVC type 32/33/34）累积为 CSD，以 `FLAG_CODEC_CONFIG` 送入，不产出帧。
 - VP8 / VP9：整帧，**不带**起始码。
+- AV1：一个完整的 temporal unit，包含重建的 OBU 头和 tile group；关键 temporal unit 开头可以携带 sequence header。
 - `长度 == 0`：可逆排空请求（见下）。
 - `长度 > 8MB (MAX_FRAME)`：协议违规，会话结束。
 

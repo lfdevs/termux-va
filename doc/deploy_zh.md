@@ -110,7 +110,7 @@ python3 /data/data/com.termux/files/usr/libexec/termux-va/test_decode.py clip.h2
 python3 .../test_decode.py clip.h264 h264 shm   # 零拷贝路径
 
 # 3. VA-API 可见性：
-vainfo                                      # AVC 和 VP9 profile、VAEntrypointVLD、NV12
+vainfo                                      # AVC、HEVC、VP9 和 AV1 profile、VAEntrypointVLD、NV12
 
 # 4. 真实解码：
 ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi -i in.mp4 -f null -

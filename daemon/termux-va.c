@@ -31,20 +31,23 @@
  *      (values unchanged; that header is mirrored into the Mesa bridge).
  *   6. Socket file name decode.sock -> termux-va.sock.
  *   7. Comments and log messages were translated to English.
+ *   8. Planar MediaCodec YUV420 output is normalized to the protocol's NV12
+ *      layout, including a direct SHM conversion path.
  *
  * Everything else - the DMD v3 wire protocol, the MediaCodec session
  * lifecycle, the memfd/SCM_RIGHTS shared-memory handoff, the drain
  * semantics and the concurrency model - is kept faithful to the original.
  * ******************************************************************************
  *
- * Listens on a path-based Unix socket, receives H.264/HEVC/VP8/VP9 units,
+ * Listens on a path-based Unix socket, receives H.264/HEVC/VP8/VP9/AV1 units,
  * decodes them with MediaCodec in hardware, and returns NV12 frames.
  * Consumers live in Linux containers sharing Termux's tmp directory
  * (proot --shared-tmp mounts it as the container /tmp).
  *
  * Wire protocol (see common/tva_protocol.h and doc/protocol.md):
  *   client -> daemon:  [4B unit length, big-endian][unit data]
- *                      (H.264/HEVC: one Annex B NALU; VP8/VP9: full frame)
+ *                      (H.264/HEVC: one Annex B NALU; VP8/VP9: full frame;
+ *                       AV1: one complete temporal unit)
  *   daemon -> client:  [4B w][4B h][4B size][4B unit-index] + NV12 data
  *                      (inline), or a 24-byte SHM control message
  *
@@ -96,6 +99,27 @@
 /* MediaCodec buffer flags (not every NDK version exports these constants) */
 #define FLAG_CODEC_CONFIG  2
 #define FLAG_END_OF_STREAM 4
+
+/* Android MediaCodec colour-format values used by byte-buffer decoders.
+ * The wire protocol deliberately exposes one layout (linear NV12), so
+ * planar output must be converted before it reaches the container-side VA
+ * bridge.  Keep these values local instead of depending on non-NDK codec
+ * headers; the Qualcomm values are also used by FFmpeg's MediaCodec code. */
+#define COLOR_FORMAT_YUV420_PLANAR             0x13
+#define COLOR_FORMAT_YUV420_PACKED_PLANAR      0x14
+#define COLOR_FORMAT_YUV420_SEMIPLANAR         0x15
+#define COLOR_FORMAT_YUV420_PACKED_SEMIPLANAR  0x27
+#define COLOR_FORMAT_YUV420_FLEXIBLE           0x7f420888
+#define COLOR_QCOM_YUV420_SEMIPLANAR           0x7fa30c00
+#define COLOR_QCOM_YUV420_SEMIPLANAR_32M       0x7fa30c04
+#define COLOR_QCOM_YUV420_SEMIPLANAR_64X32     0x7fa30c03
+#define COLOR_TI_YUV420_SEMIPLANAR             0x7f000100
+#define COLOR_TI_YUV420_SEMIPLANAR_INTERLACED  0x7f000001
+
+enum OutputLayout {
+    OUTPUT_LAYOUT_NV12 = 0,
+    OUTPUT_LAYOUT_I420 = 1,
+};
 
 /* ------------------------------------------------------------------ log */
 /*
@@ -398,6 +422,10 @@ typedef struct {
     int              crop_l, crop_t, crop_r, crop_b;
     int              fmt_sent;         /* descriptor for the current format sent */
     int              fmt_changes;      /* format change count (including first) */
+    int              color_format;     /* MediaCodec "color-format", -1 if absent */
+    int              output_layout;    /* enum OutputLayout; -1 until known */
+    uint8_t         *convert_buf;      /* reusable I420 -> NV12 conversion buffer */
+    size_t           convert_cap;
 
     /* shared-memory transport */
     XferMode         xfer;
@@ -988,36 +1016,10 @@ static void shm_teardown(Session *s)
     if (s->shm_fd >= 0) { close(s->shm_fd); s->shm_fd = -1; }
 }
 
-/*
- * Deliver one frame through shared memory: copy into a free slot and write
- * only a 24-byte control message on the socket.
- *
- *   [4B w][4B h][4B 0xFFFFFFFE][4B slot][4B length][4B unit index]
- *
- * SIX words (24 bytes), not five.  The 6th field is sent unconditionally;
- * CAP_FRAME_PTS only ANNOUNCES the field's existence in the format block,
- * it is not a send switch.  Reading 20 bytes shifts every subsequent frame
- * parse by 4 bytes and derails the whole stream - the upstream client/
- * reference implementation had exactly that bug, and this comment was the
- * source of the confusion.
- *
- * Compared with inline delivery this saves the two kernel copies (into the
- * socket buffer on send, out of it on recv).  One CPU copy remains:
- * MediaCodec output buffer -> shared memory (removing it needs dmabuf
- * zero-copy; the decoder output is gralloc-owned).
- *
- * Returns 0 on success, SEND_PEER_GONE when the client left normally,
- * -1 on a real error.
- */
-static int send_frame_shm(Session *s, const uint8_t *data, size_t len,
-                          uint32_t pts)
+/* Find a free SHM slot and claim it for the output thread.  The caller must
+ * publish the slot (or reset its state word on conversion failure). */
+static int shm_claim_slot(Session *s)
 {
-    if (len > s->shm_slot) {
-        dlog(1, "[%d] frame of %zu bytes exceeds slot of %zu, pool rebuild needed",
-             s->id, len, s->shm_slot);
-        return -1;
-    }
-
     /* Find a free slot.  Rotation starts at shm_next so all slots get fair
      * use; the client resets the state word when done.
      *
@@ -1060,7 +1062,16 @@ static int send_frame_shm(Session *s, const uint8_t *data, size_t len,
         return -1;
     }
 
-    memcpy(shm_slot_data(s, slot), data, len);
+    return slot;
+}
+
+/* Publish one frame through a claimed shared-memory slot.  The control
+ * message is six words: [w][h][sentinel][slot][length][unit index]. */
+static int shm_publish_slot(Session *s, int slot, size_t len, uint32_t pts)
+{
+    if (slot < 0 || slot >= SHM_SLOTS || len > s->shm_slot)
+        return -1;
+
     /* release ordering: make the data visible before the state word */
     __atomic_store_n(shm_slot_state(s, slot), 1u, __ATOMIC_RELEASE);
     s->shm_next = (slot + 1) % SHM_SLOTS;
@@ -1081,6 +1092,22 @@ static int send_frame_shm(Session *s, const uint8_t *data, size_t len,
         return rc;
     }
     return 0;
+}
+
+static int send_frame_shm(Session *s, const uint8_t *data, size_t len,
+                          uint32_t pts)
+{
+    if (!data || len > s->shm_slot) {
+        dlog(1, "[%d] frame of %zu bytes exceeds slot of %zu, pool rebuild needed",
+             s->id, len, s->shm_slot);
+        return -1;
+    }
+
+    int slot = shm_claim_slot(s);
+    if (slot < 0)
+        return slot;
+    memcpy(shm_slot_data(s, slot), data, len);
+    return shm_publish_slot(s, slot, len, pts);
 }
 
 /*
@@ -1120,6 +1147,202 @@ static int send_format_desc(Session *s)
     return 0;
 }
 
+static int media_color_format_is_planar(int color_format)
+{
+    switch (color_format) {
+    case COLOR_FORMAT_YUV420_PLANAR:
+    case COLOR_FORMAT_YUV420_PACKED_PLANAR:
+    case COLOR_FORMAT_YUV420_FLEXIBLE:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int media_color_format_is_semiplanar(int color_format)
+{
+    switch (color_format) {
+    case COLOR_FORMAT_YUV420_SEMIPLANAR:
+    case COLOR_FORMAT_YUV420_PACKED_SEMIPLANAR:
+    case COLOR_QCOM_YUV420_SEMIPLANAR:
+    case COLOR_QCOM_YUV420_SEMIPLANAR_32M:
+    case COLOR_QCOM_YUV420_SEMIPLANAR_64X32:
+    case COLOR_TI_YUV420_SEMIPLANAR:
+    case COLOR_TI_YUV420_SEMIPLANAR_INTERLACED:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* Convert one linear I420 byte buffer to the linear NV12 layout promised by
+ * the termux-va protocol.  MediaCodec's planar buffers use half-width U/V
+ * strides, while the protocol's interleaved UV plane uses the full luma
+ * stride.  Padding rows/columns are retained so the bridge can continue to
+ * locate UV at stride * slice-height without a format-specific path.
+ *
+ * The conversion buffer belongs to the output thread and is reused for every
+ * frame.  Returning -1 leaves the caller free to terminate the session when
+ * a malformed or truncated MediaCodec buffer is encountered. */
+struct I420Layout {
+    size_t stride;
+    size_t slice;
+    size_t chroma_width;
+    size_t chroma_rows;
+    size_t in_chroma_stride;
+    size_t y_bytes;
+    size_t uv_bytes;
+    size_t total;
+};
+
+static int i420_layout(Session *s, size_t len, struct I420Layout *layout)
+{
+    if (!layout || s->w <= 0 || s->h <= 0 ||
+        s->stride <= 0 || s->slice_height <= 0)
+        return -1;
+
+    size_t stride = (size_t)s->stride;
+    size_t slice = (size_t)s->slice_height;
+    size_t width = (size_t)s->w;
+    size_t chroma_width = (width + 1) / 2;
+    size_t chroma_rows = (slice + 1) / 2;
+    size_t in_chroma_stride = (stride + 1) / 2;
+    size_t y_bytes;
+    size_t in_chroma_bytes;
+    size_t in_need_tight;
+    size_t in_need_full;
+    size_t uv_bytes;
+
+    if (stride > SIZE_MAX / slice)
+        return -1;
+    y_bytes = stride * slice;
+    if (in_chroma_stride > SIZE_MAX / chroma_rows)
+        return -1;
+    in_chroma_bytes = in_chroma_stride * chroma_rows;
+    if (in_chroma_bytes > (SIZE_MAX - y_bytes) / 2)
+        return -1;
+    in_need_tight = y_bytes + in_chroma_bytes * 2;
+
+    /* A few codecs use a full luma stride for each planar chroma plane.  The
+     * normal Android I420 layout is the tight half-width form; recognize the
+     * full-stride form only when the buffer length identifies it exactly. */
+    if (stride > SIZE_MAX / chroma_rows)
+        return -1;
+    in_chroma_bytes = stride * chroma_rows;
+    if (in_chroma_bytes > (SIZE_MAX - y_bytes) / 2)
+        return -1;
+    in_need_full = y_bytes + in_chroma_bytes * 2;
+    if (len == in_need_full && in_need_full != in_need_tight)
+        in_chroma_stride = stride;
+    else if (len < in_need_tight)
+        return -1;
+
+    if (chroma_width > stride / 2)
+        return -1;
+    if (stride > SIZE_MAX / chroma_rows)
+        return -1;
+    uv_bytes = stride * chroma_rows;
+    if (y_bytes > SIZE_MAX - uv_bytes)
+        return -1;
+
+    layout->stride = stride;
+    layout->slice = slice;
+    layout->chroma_width = chroma_width;
+    layout->chroma_rows = chroma_rows;
+    layout->in_chroma_stride = in_chroma_stride;
+    layout->y_bytes = y_bytes;
+    layout->uv_bytes = uv_bytes;
+    layout->total = y_bytes + uv_bytes;
+    return 0;
+}
+
+static int convert_i420_to_nv12_dst(Session *s, const uint8_t *src, size_t len,
+                                    uint8_t *dst, size_t dst_cap,
+                                    size_t *out_len)
+{
+    struct I420Layout layout;
+    if (!src || !dst || !out_len || i420_layout(s, len, &layout) < 0 ||
+        dst_cap < layout.total)
+        return -1;
+
+    const size_t stride = layout.stride;
+    const size_t chroma_rows = layout.chroma_rows;
+    const size_t chroma_width = layout.chroma_width;
+    const size_t in_chroma_stride = layout.in_chroma_stride;
+    const size_t y_bytes = layout.y_bytes;
+    const size_t uv_bytes = layout.uv_bytes;
+
+    memcpy(dst, src, y_bytes);
+    memset(dst + y_bytes, 0, uv_bytes);
+
+    const uint8_t *u = src + y_bytes;
+    const uint8_t *v = u + in_chroma_stride * chroma_rows;
+    uint8_t *uv = dst + y_bytes;
+    for (size_t row = 0; row < chroma_rows; row++) {
+        const uint8_t *ur = u + row * in_chroma_stride;
+        const uint8_t *vr = v + row * in_chroma_stride;
+        uint8_t *uvr = uv + row * stride;
+        for (size_t col = 0; col < chroma_width; col++) {
+            uvr[col * 2] = ur[col];
+            uvr[col * 2 + 1] = vr[col];
+        }
+    }
+
+    *out_len = layout.total;
+    return 0;
+}
+
+static int convert_i420_to_nv12(Session *s, const uint8_t *src, size_t len,
+                                const uint8_t **out, size_t *out_len)
+{
+    struct I420Layout layout;
+    if (!src || !out || !out_len || i420_layout(s, len, &layout) < 0)
+        return -1;
+
+    if (s->convert_cap < layout.total) {
+        uint8_t *p = realloc(s->convert_buf, layout.total);
+        if (!p)
+            return -1;
+        s->convert_buf = p;
+        s->convert_cap = layout.total;
+    }
+
+    if (convert_i420_to_nv12_dst(s, src, len, s->convert_buf,
+                                 s->convert_cap, out_len) < 0)
+        return -1;
+    *out = s->convert_buf;
+    return 0;
+}
+
+/* AV1's MediaCodec output is I420 on the target.  For SHM delivery, write
+ * the normalized NV12 frame straight into the claimed slot so the output
+ * thread avoids a temporary full-frame conversion copy. */
+static int send_frame_shm_i420(Session *s, const uint8_t *data, size_t len,
+                               uint32_t pts)
+{
+    struct I420Layout layout;
+    if (!data || i420_layout(s, len, &layout) < 0 ||
+        layout.total > s->shm_slot) {
+        dlog(1, "[%d] invalid I420 output for SHM: %zu bytes (slot %zu)",
+             s->id, len, s->shm_slot);
+        return -1;
+    }
+
+    int slot = shm_claim_slot(s);
+    if (slot < 0)
+        return slot;
+
+    size_t out_len = 0;
+    uint8_t *dst = shm_slot_data(s, slot);
+    if (convert_i420_to_nv12_dst(s, data, len, dst, s->shm_slot,
+                                 &out_len) < 0) {
+        __atomic_store_n(shm_slot_state(s, slot), 0u, __ATOMIC_RELEASE);
+        dlog(1, "[%d] I420 to NV12 conversion failed for SHM frame", s->id);
+        return -1;
+    }
+    return shm_publish_slot(s, slot, out_len, pts);
+}
+
 /*
  * Output thread: dequeues decoded frames and writes them back to the
  * socket.  Fully decoupled from the input thread - sending a large frame
@@ -1151,31 +1374,73 @@ static void *output_thread(void *arg)
                 size_t osz;
                 uint8_t *ob = AMediaCodec_getOutputBuffer(s->codec, oi, &osz);
                 if (ob) {
-                    int rc;
-                    if (s->xfer == XFER_SHM) {
-                        rc = send_frame_shm(s, ob + info.offset,
-                                            (size_t)info.size,
-                                            (uint32_t)(info.presentationTimeUs / PTS_UNIT_SCALE));
+                    int rc = -1;
+                    size_t off = (size_t)info.offset;
+                    size_t frame_size = (size_t)info.size;
+                    const uint8_t *frame_data = NULL;
+
+                    if (off <= osz && frame_size <= osz - off) {
+                        frame_data = ob + off;
+
+                        if (s->output_layout < 0)
+                            s->output_layout = s->codec_id == CODEC_AV1
+                                                   ? OUTPUT_LAYOUT_I420
+                                                   : OUTPUT_LAYOUT_NV12;
+
                     } else {
-                        /* 4th field = input unit index of this frame.
-                         * MediaCodec carries the presentationTimeUs given
-                         * at queueInputBuffer verbatim onto the output
-                         * frame, so the bridge knows exactly which
-                         * submission produced it. */
-                        uint32_t hdr[4] = {
-                            htonl((uint32_t)s->w),
-                            htonl((uint32_t)s->h),
-                            htonl((uint32_t)info.size),
-                            htonl((uint32_t)(info.presentationTimeUs / PTS_UNIT_SCALE))
-                        };
-                        rc = send_all(s->fd, hdr, sizeof(hdr));
-                        size_t off = (size_t)info.offset;
-                        size_t rem = (size_t)info.size;
-                        while (rc == 0 && rem > 0) {
-                            size_t ch = rem > SEND_CHUNK ? SEND_CHUNK : rem;
-                            rc = send_all(s->fd, ob + off, ch);
-                            if (rc != 0) break;
-                            off += ch; rem -= ch;
+                        dlog(0, "[%d] invalid output buffer range: offset=%zu size=%zu buffer=%zu",
+                             s->id, off, frame_size, osz);
+                    }
+
+                    if (frame_data) {
+                        uint32_t pts = (uint32_t)(info.presentationTimeUs /
+                                                  PTS_UNIT_SCALE);
+                        bool i420 = s->output_layout == OUTPUT_LAYOUT_I420;
+
+                        /* The AV1 decoder on the target returns
+                         * COLOR_FormatYUV420Planar (I420), unlike the NV12
+                         * output used by H.264/HEVC.  Keep the wire format
+                         * stable and normalize the frame.  SHM delivery can
+                         * convert directly into the claimed slot to avoid a
+                         * second full-frame copy through convert_buf. */
+                        if (i420 && s->xfer == XFER_SHM) {
+                            rc = send_frame_shm_i420(s, frame_data, frame_size,
+                                                     pts);
+                        } else {
+                            if (i420 &&
+                                convert_i420_to_nv12(s, frame_data, frame_size,
+                                                     &frame_data, &frame_size) < 0) {
+                                dlog(0, "[%d] invalid I420 output buffer: %zu bytes",
+                                     s->id, frame_size);
+                                frame_data = NULL;
+                            }
+                            if (frame_data && s->xfer == XFER_SHM) {
+                                rc = send_frame_shm(s, frame_data, frame_size,
+                                                    pts);
+                            } else if (frame_data) {
+                                /* 4th field = input unit index of this
+                                 * frame.  MediaCodec carries the
+                                 * presentationTimeUs given at
+                                 * queueInputBuffer verbatim onto the output
+                                 * frame, so the bridge knows exactly which
+                                 * submission produced it. */
+                                uint32_t hdr[4] = {
+                                    htonl((uint32_t)s->w),
+                                    htonl((uint32_t)s->h),
+                                    htonl((uint32_t)frame_size),
+                                    htonl(pts)
+                                };
+                                rc = send_all(s->fd, hdr, sizeof(hdr));
+                                size_t frame_off = 0;
+                                size_t rem = frame_size;
+                                while (rc == 0 && rem > 0) {
+                                    size_t ch = rem > SEND_CHUNK ? SEND_CHUNK : rem;
+                                    rc = send_all(s->fd, frame_data + frame_off, ch);
+                                    if (rc != 0) break;
+                                    frame_off += ch;
+                                    rem -= ch;
+                                }
+                            }
                         }
                     }
                     if (rc == SEND_PEER_GONE) {
@@ -1193,7 +1458,7 @@ static void *output_thread(void *arg)
                         s->stop = 1;
                     } else {
                         s->frames_out++;
-                        dlog(2, "[%d] frame %dx%d %d bytes", s->id, s->w, s->h, info.size);
+                        dlog(2, "[%d] frame %dx%d %zu bytes", s->id, s->w, s->h, frame_size);
                     }
                 }
             }
@@ -1245,6 +1510,26 @@ static void *output_thread(void *arg)
                 s->stride = stride;
                 s->slice_height = slice;
 
+                int32_t color_format = -1;
+                int have_color_format = AMediaFormat_getInt32(
+                    of, AMEDIAFORMAT_KEY_COLOR_FORMAT, &color_format);
+                s->color_format = have_color_format ? (int)color_format : -1;
+                if (have_color_format &&
+                    media_color_format_is_planar((int)color_format)) {
+                    s->output_layout = OUTPUT_LAYOUT_I420;
+                } else if (have_color_format &&
+                           media_color_format_is_semiplanar((int)color_format)) {
+                    s->output_layout = OUTPUT_LAYOUT_NV12;
+                } else {
+                    /* AV1 on the tested Qualcomm decoder reports a vendor or
+                     * flexible value inconsistently, but its byte layout is
+                     * still I420.  Preserve the historical NV12 assumption
+                     * for other codecs when the format is missing/unknown. */
+                    s->output_layout = s->codec_id == CODEC_AV1
+                                           ? OUTPUT_LAYOUT_I420
+                                           : OUTPUT_LAYOUT_NV12;
+                }
+
                 /* Display crop rect: the actually visible region.  When
                  * 1080p decodes into a 1920x1088 buffer, crop_bottom is
                  * 1079 and the extra 8 rows are alignment padding. */
@@ -1256,8 +1541,11 @@ static void *output_thread(void *arg)
                 AMediaFormat_delete(of);
 
                 s->fmt_changes++;
-                dlog(1, "[%d] output format %dx%d stride=%d slice=%d crop=(%d,%d)-(%d,%d)%s",
-                     s->id, w, h, stride, slice, cl, ct, cr, cb,
+                dlog(1, "[%d] output format %dx%d stride=%d slice=%d color=0x%x layout=%s crop=(%d,%d)-(%d,%d)%s",
+                     s->id, w, h, stride, slice,
+                     (unsigned)(uint32_t)s->color_format,
+                     s->output_layout == OUTPUT_LAYOUT_I420 ? "I420" : "NV12",
+                     cl, ct, cr, cb,
                      s->fmt_changes > 1 ? " (mid-stream change)" : "");
 
                 /* Mark for (re)sending: on a mid-stream resolution change
@@ -1440,6 +1728,7 @@ out_fmt:
     AMediaFormat_delete(fmt);
 out_fd:
     shm_teardown(s);
+    free(s->convert_buf);
     close(s->fd);
     free(s);
     client_release();
@@ -1925,6 +2214,8 @@ int main(int argc, char **argv)
         s->xfer     = XFER_INLINE;
         s->shm_fd     = -1;   /* calloc zeroes; 0 is a legal fd, so set -1 here */
         s->shm_listen = -1;
+        s->color_format = -1;
+        s->output_layout = -1;
 
         pthread_t th;
         if (pthread_create(&th, NULL, session_thread, s) != 0) {
