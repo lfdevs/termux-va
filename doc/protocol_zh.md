@@ -19,7 +19,8 @@
 ```
 
 - `version`：客户端声明的协议版本。daemon 接受 `2..3` 并取最小值。版本语义：v2 增加 SHM 协商，v3 在响应中增加 endpoint 扩展。
-- `codec`：`0=AVC (video/avc), 1=HEVC (video/hevc), 2=VP9, 3=VP8, 4=AV1 (video/av01)。
+- `codec`：`0=AVC (video/avc), 1=HEVC (video/hevc), 2=VP9, 3=VP8, 4=AV1 (video/av01), 5=AVC 编码器, 6=HEVC 编码器`。
+- 编码会话使用内联传输，在同一个握手和 socket 上交换打包的 NV12 帧与 Annex B 编码访问单元；编码会话不会发送解码格式描述块。
 - `宽/高`：初始分辨率，有效范围 96x96..8192x4320。
 - `xfer`：请求的帧回传方式，`0=内联`，`1=SHM`。
 
@@ -99,6 +100,22 @@ memfd 在握手响应之后立即交接：daemon 在 abstract socket `dmd-shm-<p
 每个槽位在控制区偏移 `槽位*4` 处有一个 u32 状态字：daemon 写完帧置 1（release 语义）；客户端消费完置 0（槽位归还）。单槽大小 = `align128(max(宽,1920)) * align32(max(高,1088)) * 1.5`，下限 64KB。`SHM_SLOTS`（8）必须 >= 桥的流水线深度（6），daemon 的槽位等待（15s）必须显著大于桥的取帧超时（5s）。
 
 SHM 交接失败时双方都自动降级为内联，没有硬失败路径。
+
+## 编码会话
+
+对于 codec ID 5 和 6，上行单元是协商宽高对应的打包 NV12 帧：
+
+```
+[u32 长度][Y 平面][交错 UV 平面]
+```
+
+daemon 为每一帧返回一个编码访问单元：
+
+```
+[u32 长度][u32 flags][u32 unit_index][Annex B 访问单元]
+```
+
+`flags` 会在适用时携带 `FLAG_KEY_FRAME` 和 `FLAG_CODEC_CONFIG`。第一个数据包包含独立 Annex B 码流所需的编码配置 NAL 单元。上行长度为零表示请求结束输入流。
 
 ## 会话结束
 

@@ -95,6 +95,7 @@
 #define INPUT_TIMEOUT_US   5000000
 #define OUTPUT_TIMEOUT_US  20000
 #define SEND_CHUNK         262144
+#define MAX_ENCODE_PACKET  (64u * 1024u * 1024u)
 
 /* MediaCodec buffer flags (not every NDK version exports these constants) */
 #define FLAG_CODEC_CONFIG  2
@@ -291,6 +292,8 @@ static const char *codec_mime(int id)
     case CODEC_VP9:  return "video/x-vnd.on2.vp9";
     case CODEC_VP8:  return "video/x-vnd.on2.vp8";
     case CODEC_AV1:  return "video/av01";
+    case CODEC_H264_ENC: return "video/avc";
+    case CODEC_HEVC_ENC: return "video/hevc";
     default:         return NULL;
     }
 }
@@ -414,6 +417,7 @@ typedef struct {
     /* handshake result */
     int              codec_id;         /* CodecId, defaults to CODEC_H264 */
     const char      *mime;
+    int              encoder;          /* raw NV12 input -> encoded packets */
     int              negotiated;       /* 1 = client completed the handshake */
 
     /* output format details (written by the output thread only) */
@@ -553,6 +557,7 @@ static int do_handshake(Session *s)
 
     s->codec_id   = (int)cid;
     s->mime       = mime;
+    s->encoder    = codec_is_encoder((int)cid);
     s->w          = (int)w;
     s->h          = (int)h;
     s->negotiated = 1;
@@ -561,7 +566,7 @@ static int do_handshake(Session *s)
      * carries the abstract socket name.  The daemon picks the name - the
      * client cannot know it is connection #N, and guessing would collide. */
     XferMode want = XFER_INLINE;
-    if (xfer == XFER_SHM) {
+    if (xfer == XFER_SHM && !s->encoder) {
         if (shm_prepare(s, (int)w, (int)h) == 0) {
             want = XFER_SHM;
         } else {
@@ -625,8 +630,9 @@ static int do_handshake(Session *s)
      * transport.  That ambiguity once cost upstream a misdiagnosis.  With
      * TCP removed the naming is unambiguous: SHM or inline.  The control
      * transport is always the Unix socket printed by "listening on ...". */
-    dlog(1, "[%d] handshake ok: %s %ux%u frame-delivery=%s",
-         s->id, mime, w, h, s->xfer == XFER_SHM ? "SHM" : "inline");
+    dlog(1, "[%d] handshake ok: %s %s %ux%u transport=%s",
+         s->id, s->encoder ? "encoder" : "decoder", mime, w, h,
+         s->xfer == XFER_SHM ? "SHM" : "inline");
     return 0;
 
 reply_fail:
@@ -1583,6 +1589,185 @@ static void client_release(void)
     pthread_mutex_unlock(&count_lock);
 }
 
+/* ---------------------------------------------------------------- encoder */
+/*
+ * Encoder sessions deliberately use a small synchronous protocol.  The
+ * bridge sends one packed NV12 frame as a length-prefixed unit and waits for
+ * the corresponding encoded access unit before sending the next frame.  This
+ * keeps the first implementation deterministic and avoids exposing decoder
+ * SHM slots to a variable-size bitstream.  The Qualcomm C2 components used
+ * on the target have no B-frame requirement when max-bframes=0, so one output
+ * packet is available for each input frame.
+ */
+static int encoder_send_packet(Session *s, const uint8_t *data, size_t len,
+                               uint32_t flags, uint32_t pts)
+{
+    if (!len || len > MAX_ENCODE_PACKET)
+        return -1;
+
+    uint32_t hdr[3] = { htonl((uint32_t)len), htonl(flags), htonl(pts) };
+    if (send_all(s->fd, hdr, sizeof(hdr)) < 0)
+        return -1;
+    size_t off = 0;
+    while (off < len) {
+        size_t chunk = len - off;
+        if (chunk > SEND_CHUNK)
+            chunk = SEND_CHUNK;
+        if (send_all(s->fd, data + off, chunk) < 0)
+            return -1;
+        off += chunk;
+    }
+    s->frames_out++;
+    return 0;
+}
+
+static int encoder_append_csd(uint8_t **csd, size_t *csd_len,
+                             size_t *csd_cap, const uint8_t *data, size_t len)
+{
+    if (!len || *csd_len > MAX_FRAME - len)
+        return -1;
+    if (*csd_len + len > *csd_cap) {
+        size_t cap = *csd_cap ? *csd_cap : 4096;
+        while (cap < *csd_len + len)
+            cap += cap / 2;
+        uint8_t *p = realloc(*csd, cap);
+        if (!p)
+            return -1;
+        *csd = p;
+        *csd_cap = cap;
+    }
+    memcpy(*csd + *csd_len, data, len);
+    *csd_len += len;
+    return 0;
+}
+
+static int encoder_drain_output(Session *s, uint8_t **csd, size_t *csd_len,
+                                size_t *csd_cap, bool *packet_sent,
+                                uint32_t pts)
+{
+    for (;;) {
+        AMediaCodecBufferInfo info;
+        ssize_t oi = AMediaCodec_dequeueOutputBuffer(s->codec, &info,
+                                                     OUTPUT_TIMEOUT_US * 250);
+        if (oi == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED ||
+            oi == AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED)
+            continue;
+        if (oi == AMEDIACODEC_INFO_TRY_AGAIN_LATER)
+            return *packet_sent ? 0 : -1;
+        if (oi < 0)
+            return -1;
+
+        size_t osz = 0;
+        uint8_t *ob = AMediaCodec_getOutputBuffer(s->codec, oi, &osz);
+        size_t off = info.offset < 0 ? 0 : (size_t)info.offset;
+        size_t len = info.size < 0 ? 0 : (size_t)info.size;
+        int rc = 0;
+        if (!ob || off > osz || len > osz - off) {
+            dlog(0, "[%d] encoder output range invalid: offset=%zu size=%zu buffer=%zu",
+                 s->id, off, len, osz);
+            rc = -1;
+        } else if (info.flags & FLAG_CODEC_CONFIG) {
+            rc = encoder_append_csd(csd, csd_len, csd_cap, ob + off, len);
+        } else if (len) {
+            size_t total = len + *csd_len;
+            uint8_t *packet = malloc(total);
+            if (!packet)
+                rc = -1;
+            else {
+                if (*csd_len)
+                    memcpy(packet, *csd, *csd_len);
+                memcpy(packet + *csd_len, ob + off, len);
+                rc = encoder_send_packet(s, packet, total,
+                                         (uint32_t)info.flags, pts);
+                free(packet);
+                if (rc == 0) {
+                    *csd_len = 0;
+                    *packet_sent = true;
+                }
+            }
+        }
+        AMediaCodec_releaseOutputBuffer(s->codec, oi, 0);
+        if (rc < 0)
+            return rc;
+        if (*packet_sent)
+            return 0;
+    }
+}
+
+static int encoder_run(Session *s)
+{
+    uint8_t *input = malloc(MAX_FRAME);
+    uint8_t *csd = NULL;
+    size_t csd_len = 0, csd_cap = 0;
+    if (!input)
+        return -1;
+
+    uint32_t frame_no = 0;
+    for (;;) {
+        uint32_t sz_be;
+        if (recv_all(s->fd, &sz_be, sizeof(sz_be)) < 0)
+            break;
+        uint32_t sz = ntohl(sz_be);
+        if (sz == 0)
+            break;
+        if (sz > MAX_FRAME || recv_all(s->fd, input, sz) < 0) {
+            dlog(1, "[%d] invalid encoder input frame size: %u", s->id, sz);
+            break;
+        }
+        s->units_in++;
+
+        ssize_t bi;
+        int tries = 0;
+        do {
+            bi = AMediaCodec_dequeueInputBuffer(s->codec, INPUT_TIMEOUT_US);
+            if (bi == AMEDIACODEC_INFO_TRY_AGAIN_LATER && ++tries < 12)
+                continue;
+            break;
+        } while (running && !s->stop);
+        if (bi < 0)
+            break;
+        size_t cap = 0;
+        uint8_t *ib = AMediaCodec_getInputBuffer(s->codec, bi, &cap);
+        if (!ib || cap < sz) {
+            dlog(1, "[%d] encoder input buffer too small: %u > %zu", s->id, sz, cap);
+            break;
+        }
+        memcpy(ib, input, sz);
+        uint32_t pts = ++frame_no;
+        if (AMediaCodec_queueInputBuffer(s->codec, bi, 0, sz,
+                                         (int64_t)pts * PTS_UNIT_SCALE, 0) != AMEDIA_OK)
+            break;
+
+        bool packet_sent = false;
+        if (encoder_drain_output(s, &csd, &csd_len, &csd_cap,
+                                 &packet_sent, pts) < 0)
+            break;
+    }
+
+    /* Flush any delayed packet before closing the codec. */
+    if (s->codec && !s->stop) {
+        ssize_t bi = AMediaCodec_dequeueInputBuffer(s->codec, INPUT_TIMEOUT_US);
+        if (bi >= 0)
+            AMediaCodec_queueInputBuffer(s->codec, bi, 0, 0, 0,
+                                         FLAG_END_OF_STREAM);
+        for (int i = 0; i < 64 && !s->stop; i++) {
+            AMediaCodecBufferInfo info;
+            ssize_t oi = AMediaCodec_dequeueOutputBuffer(s->codec, &info,
+                                                         OUTPUT_TIMEOUT_US);
+            if (oi == AMEDIACODEC_INFO_TRY_AGAIN_LATER)
+                continue;
+            if (oi < 0)
+                continue;
+            AMediaCodec_releaseOutputBuffer(s->codec, oi, 0);
+            if (info.flags & FLAG_END_OF_STREAM)
+                break;
+        }
+    }
+    free(csd);
+    free(input);
+    return 0;
+}
+
 /*
  * Session thread: creates the decoder for one client and runs the
  * input/output threads until the session ends.
@@ -1590,12 +1775,56 @@ static void client_release(void)
 static void *session_thread(void *arg)
 {
     Session *s = arg;
+    AMediaFormat *fmt = NULL;
 
     /* The handshake must complete before the decoder is configured: it
      * decides the MIME and the initial resolution */
     if (do_handshake(s) < 0) goto out_fd;
 
-    AMediaFormat *fmt = AMediaFormat_new();
+    if (s->encoder) {
+        AMediaFormat *enc_fmt = AMediaFormat_new();
+        if (!enc_fmt) {
+            dlog(0, "[%d] AMediaFormat_new failed for encoder", s->id);
+            goto out_fd;
+        }
+        AMediaFormat_setString(enc_fmt, AMEDIAFORMAT_KEY_MIME, s->mime);
+        AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_WIDTH, s->w);
+        AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_HEIGHT, s->h);
+        AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_BIT_RATE, 8 * 1000 * 1000);
+        AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_FRAME_RATE, 30);
+        AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_I_FRAME_INTERVAL, 1);
+        AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_MAX_INPUT_SIZE, MAX_FRAME);
+        /* Qualcomm's byte-buffer encoders accept semi-planar NV12. */
+        AMediaFormat_setInt32(enc_fmt, "color-format", COLOR_FORMAT_YUV420_SEMIPLANAR);
+        AMediaFormat_setInt32(enc_fmt, "bitrate-mode", 1); /* VBR */
+        AMediaFormat_setInt32(enc_fmt, "max-bframes", 0);
+        AMediaFormat_setInt32(enc_fmt, "low-latency", 1);
+
+        s->codec = AMediaCodec_createEncoderByType(s->mime);
+        if (!s->codec) {
+            dlog(0, "[%d] no available encoder: %s", s->id, s->mime);
+            AMediaFormat_delete(enc_fmt);
+            goto out_fd;
+        }
+        media_status_t st = AMediaCodec_configure(s->codec, enc_fmt, NULL, NULL, 1);
+        if (st != AMEDIA_OK) {
+            dlog(0, "[%d] encoder configure failed: %d", s->id, st);
+            AMediaFormat_delete(enc_fmt);
+            goto out_started;
+        }
+        st = AMediaCodec_start(s->codec);
+        AMediaFormat_delete(enc_fmt);
+        if (st != AMEDIA_OK) {
+            dlog(0, "[%d] encoder start failed: %d", s->id, st);
+            goto out_started;
+        }
+        encoder_run(s);
+        dlog(1, "[%d] encoder session end: %ld units in, %ld packets out",
+             s->id, s->units_in, s->frames_out);
+        goto out_started;
+    }
+
+    fmt = AMediaFormat_new();
     if (!fmt) { dlog(0, "[%d] AMediaFormat_new failed", s->id); goto out_fd; }
     AMediaFormat_setString(fmt, AMEDIAFORMAT_KEY_MIME, s->mime);
     AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_WIDTH, s->w);

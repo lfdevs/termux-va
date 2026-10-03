@@ -6,7 +6,7 @@
 
 从 Termux 向 Linux 容器提供 MediaCodec 硬件视频解码能力。
 
-`termux-va` 是 [DroidSpaces Media Decode Daemon](https://github.com/Re-s/droidspaces-media-decode/tree/143610b816da5c612c325a2170dbc5621b5ce1eb) 的 Termux 移植版：一个小型 C 守护进程，通过 Unix socket 接收 AVC/HEVC/VP8/VP9/AV1 码流，用 Android MediaCodec API 硬件解码，回传 NV12 帧（内联传输，或经 memfd 槽位池零拷贝）。与 Termux 共享 tmp 目录的 Linux 容器内的应用通过标准 VA-API 使用它，无需任何改动：ffmpeg、Firefox、Chrome 均可用。
+`termux-va` 是 [DroidSpaces Media Decode Daemon](https://github.com/Re-s/droidspaces-media-decode/tree/143610b816da5c612c325a2170dbc5621b5ce1eb) 的 Termux 移植版：一个小型 C 守护进程，通过 Unix socket 接收 AVC/HEVC/VP8/VP9/AV1 码流，用 Android MediaCodec API 硬件解码，回传 NV12 帧（内联传输，或经 memfd 槽位池零拷贝）；同时接收打包的 NV12 帧，使用硬件进行 AVC 和 HEVC 编码。与 Termux 共享 tmp 目录的 Linux 容器内的应用通过标准 VA-API 使用它，无需任何改动：ffmpeg、Firefox、Chrome 均可用。
 
 ## 整体结构
 
@@ -65,7 +65,7 @@ vainfo
 ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi -i in.mp4 -f null -
 ```
 
-将 `TERMUX_VA_GPU_BACKEND` 改为 `sw` 可强制 Mesa 使用 llvmpipe 的 surface 和帧拷贝路径；这不会关闭 Termux daemon 中的 MediaCodec 解码。Mesa bridge 对外声明 AVC（Constrained Baseline/Main/High）、HEVC Main、VP9 Profile 0 和 AV1 Main。实际可用的 profile 仍由设备上的 MediaCodec 实现决定。
+将 `TERMUX_VA_GPU_BACKEND` 改为 `sw` 可强制 Mesa 使用 llvmpipe 的 surface 和帧拷贝路径；这不会关闭 Termux daemon 中的 MediaCodec 解码。Mesa bridge 对外声明解码 AVC（Constrained Baseline/Main/High）、HEVC Main、VP9 Profile 0 和 AV1 Main，并声明 AVC 与 HEVC slice 编码。实际可用的 profile 仍由设备上的 MediaCodec 实现决定。
 
 完整部署手册见 [doc/deploy_zh.md](doc/deploy_zh.md)，线路协议见 [doc/protocol_zh.md](doc/protocol_zh.md)。
 

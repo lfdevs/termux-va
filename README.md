@@ -6,7 +6,7 @@
 
 MediaCodec hardware video decoding for Linux containers, served from Termux.
 
-`termux-va` is a Termux port of [DroidSpaces Media Decode Daemon](https://github.com/Re-s/droidspaces-media-decode/tree/143610b816da5c612c325a2170dbc5621b5ce1eb): a small C daemon that receives AVC/HEVC/VP8/VP9/AV1 bitstreams over a Unix socket, decodes them with the Android MediaCodec API in hardware, and returns NV12 frames (inline, or zero-copy through a memfd slot pool). Applications inside a Linux container that shares Termux's tmp directory use it through the standard VA-API, without any modification: ffmpeg, Firefox and Chrome all work.
+`termux-va` is a Termux port of [DroidSpaces Media Decode Daemon](https://github.com/Re-s/droidspaces-media-decode/tree/143610b816da5c612c325a2170dbc5621b5ce1eb): a small C daemon that receives AVC/HEVC/VP8/VP9/AV1 bitstreams over a Unix socket, decodes them with the Android MediaCodec API in hardware, and returns NV12 frames (inline, or zero-copy through a memfd slot pool). It also accepts packed NV12 frames for hardware AVC and HEVC encoding. Applications inside a Linux container that shares Termux's tmp directory use it through the standard VA-API, without any modification: ffmpeg, Firefox and Chrome all work.
 
 ## How it fits together
 
@@ -65,7 +65,7 @@ vainfo
 ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi -i in.mp4 -f null -
 ```
 
-Set `TERMUX_VA_GPU_BACKEND=sw` instead to force Mesa's llvmpipe surface and frame-copy path; this does not disable MediaCodec decoding in the Termux daemon. The bridge advertises AVC (Constrained Baseline/Main/High), HEVC Main, VP9 Profile 0 and AV1 Main. The device's MediaCodec implementation still determines which advertised profiles are available at runtime.
+Set `TERMUX_VA_GPU_BACKEND=sw` instead to force Mesa's llvmpipe surface and frame-copy path; this does not disable MediaCodec decoding in the Termux daemon. The bridge advertises AVC (Constrained Baseline/Main/High), HEVC Main, VP9 Profile 0 and AV1 Main for decode, plus AVC and HEVC slice encoding. The device's MediaCodec implementation still determines which advertised profiles are available at runtime.
 
 See [doc/deploy.md](doc/deploy.md) for the full deployment manual and [doc/protocol.md](doc/protocol.md) for the wire protocol.
 

@@ -19,7 +19,8 @@ The client sends 24 bytes before anything else:
 ```
 
 - `version`: protocol version, client-declared.  The daemon accepts `2..3` and takes the minimum.  Version semantics: v2 added SHM negotiation, v3 added the endpoint extension in the response.
-- `codec`: `0=AVC (video/avc), 1=HEVC (video/hevc), 2=VP9, 3=VP8, 4=AV1 (video/av01)`.
+- `codec`: `0=AVC (video/avc), 1=HEVC (video/hevc), 2=VP9, 3=VP8, 4=AV1 (video/av01), 5=AVC encoder, 6=HEVC encoder`.
+- Encoder sessions use inline transport and exchange packed NV12 frames for encoded Annex B access units.  They use the same handshake and socket, but do not send a decoder format descriptor.
 - `width/height`: initial resolution; valid range 96x96..8192x4320.
 - `xfer`: requested frame-return transport, `0=inline`, `1=SHM`.
 
@@ -99,6 +100,22 @@ Pool layout:
 Each slot has a u32 state word in the control area at offset `slot*4`: the daemon sets it to 1 (release semantics) after writing the frame; the client resets it to 0 after consuming (the slot is then free).  Slot size is `align128(max(w,1920)) * align32(max(h,1088)) * 1.5` with a 64KB floor. `SHM_SLOTS` (8) must stay >= the bridge's pipeline depth (6), and the daemon's slot wait (15s) must stay well above the bridge's frame timeout (5s).
 
 A failed SHM handoff downgrades the session to inline automatically on both sides; there is no hard failure path.
+
+## Encoder sessions
+
+For codec IDs 5 and 6, the uplink unit is a packed NV12 frame with the negotiated width and height:
+
+```
+[u32 length][Y plane][interleaved UV plane]
+```
+
+The daemon returns one encoded access unit for each frame:
+
+```
+[u32 length][u32 flags][u32 unit_index][Annex B access unit]
+```
+
+`flags` carries `FLAG_KEY_FRAME` and `FLAG_CODEC_CONFIG` when applicable.  The first packet includes the codec configuration NAL units required by a standalone Annex B stream.  A zero-length uplink unit requests end of stream.
 
 ## End of session
 
