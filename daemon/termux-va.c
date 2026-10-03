@@ -418,6 +418,9 @@ typedef struct {
     int              codec_id;         /* CodecId, defaults to CODEC_H264 */
     const char      *mime;
     int              encoder;          /* raw NV12 input -> encoded packets */
+    uint32_t         bitrate;          /* encoder target, bits per second */
+    uint32_t         fps_num;          /* encoder input frame rate */
+    uint32_t         fps_den;
     int              negotiated;       /* 1 = client completed the handshake */
 
     /* output format details (written by the output thread only) */
@@ -491,7 +494,8 @@ static void shm_teardown(Session *s);
 
 /*
  * Handshake.  Reads the first 4 bytes:
- *   equal to the magic -> read the remaining 20 bytes, configure the
+ *   equal to the magic -> read the remaining base fields (plus the
+ *                        encoder extension when requested), configure the
  *                        session accordingly, send the handshake response
  *   anything else      -> protocol violation, reject (bare 12-byte status=4)
  * Returns 0 to continue, -1 to drop the connection.
@@ -527,6 +531,38 @@ static int do_handshake(Session *s)
     uint32_t w     = ntohl(rest[2]);
     uint32_t h     = ntohl(rest[3]);
     uint32_t xfer  = ntohl(rest[4]);   /* requested transport, may be downgraded */
+    uint32_t bitrate = 0;
+    uint32_t fps_num = 30, fps_den = 1;
+
+    /* Encoder handshakes append the VA-API target bitrate and frame rate.
+     * Decoder handshakes remain the original six words, so existing decode
+     * clients retain byte-compatible protocol-v3 behavior.  Zero requests
+     * the historical daemon default. */
+    if (codec_is_encoder((int)cid) && recv_all(s->fd, &bitrate, 4) < 0) {
+        dlog(1, "[%d] incomplete encoder bitrate in handshake", s->id);
+        return -1;
+    }
+    bitrate = ntohl(bitrate);
+    if (codec_is_encoder((int)cid)) {
+        uint32_t rate[2];
+        if (recv_all(s->fd, rate, sizeof(rate)) < 0) {
+            dlog(1, "[%d] incomplete encoder frame rate in handshake", s->id);
+            return -1;
+        }
+        fps_num = ntohl(rate[0]);
+        fps_den = ntohl(rate[1]);
+        if (!fps_num || !fps_den || fps_num > 1000 || fps_den > 1000) {
+            dlog(1, "[%d] encoder frame rate %u/%u is out of range, using 30/1",
+                 s->id, fps_num, fps_den);
+            fps_num = 30;
+            fps_den = 1;
+        }
+    }
+    if (bitrate > 100000000u) {
+        dlog(1, "[%d] encoder bitrate %u is out of range, using default",
+             s->id, bitrate);
+        bitrate = 0;
+    }
 
     uint32_t status = 0;
     const char *mime = (cid < CODEC_MAX) ? codec_mime((int)cid) : NULL;
@@ -558,6 +594,9 @@ static int do_handshake(Session *s)
     s->codec_id   = (int)cid;
     s->mime       = mime;
     s->encoder    = codec_is_encoder((int)cid);
+    s->bitrate    = bitrate;
+    s->fps_num    = fps_num;
+    s->fps_den    = fps_den;
     s->w          = (int)w;
     s->h          = (int)h;
     s->negotiated = 1;
@@ -630,9 +669,13 @@ static int do_handshake(Session *s)
      * transport.  That ambiguity once cost upstream a misdiagnosis.  With
      * TCP removed the naming is unambiguous: SHM or inline.  The control
      * transport is always the Unix socket printed by "listening on ...". */
-    dlog(1, "[%d] handshake ok: %s %s %ux%u transport=%s",
-         s->id, s->encoder ? "encoder" : "decoder", mime, w, h,
-         s->xfer == XFER_SHM ? "SHM" : "inline");
+    if (s->encoder)
+        dlog(1, "[%d] handshake ok: encoder %s %ux%u transport=%s bitrate=%u fps=%u/%u",
+             s->id, mime, w, h, s->xfer == XFER_SHM ? "SHM" : "inline",
+             s->bitrate, s->fps_num, s->fps_den);
+    else
+        dlog(1, "[%d] handshake ok: decoder %s %ux%u transport=%s",
+             s->id, mime, w, h, s->xfer == XFER_SHM ? "SHM" : "inline");
     return 0;
 
 reply_fail:
@@ -1734,8 +1777,16 @@ static int encoder_run(Session *s)
         }
         memcpy(ib, input, sz);
         uint32_t pts = ++frame_no;
+        /* Encoder input timestamps are only used by MediaCodec's rate
+         * controller.  A unit index scaled by 1 ms (the decoder pairing
+         * convention) would look like a 1000-fps stream and makes bitrate
+         * control ineffective.  Match the input rate negotiated in the
+         * handshake; the bridge does not use this value for container PTS. */
+        int64_t frame_duration_us =
+            ((int64_t)1000000 * s->fps_den + s->fps_num / 2) / s->fps_num;
+        int64_t pts_us = (int64_t)pts * frame_duration_us;
         if (AMediaCodec_queueInputBuffer(s->codec, bi, 0, sz,
-                                         (int64_t)pts * PTS_UNIT_SCALE, 0) != AMEDIA_OK)
+                                         pts_us, 0) != AMEDIA_OK)
             break;
 
         bool packet_sent = false;
@@ -1790,13 +1841,21 @@ static void *session_thread(void *arg)
         AMediaFormat_setString(enc_fmt, AMEDIAFORMAT_KEY_MIME, s->mime);
         AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_WIDTH, s->w);
         AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_HEIGHT, s->h);
-        AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_BIT_RATE, 8 * 1000 * 1000);
-        AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_FRAME_RATE, 30);
+        /* The VA frontend sends -b:v through the encoder handshake.  Keep
+         * the old 8 Mbps value only for clients that leave the field zero. */
+        int bitrate = s->bitrate ? (int)s->bitrate : 8 * 1000 * 1000;
+        AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_BIT_RATE, bitrate);
+        int frame_rate = (int)(((uint64_t)s->fps_num + s->fps_den / 2) /
+                               s->fps_den);
+        AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_FRAME_RATE,
+                              frame_rate > 0 ? frame_rate : 30);
         AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_I_FRAME_INTERVAL, 1);
         AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_MAX_INPUT_SIZE, MAX_FRAME);
         /* Qualcomm's byte-buffer encoders accept semi-planar NV12. */
         AMediaFormat_setInt32(enc_fmt, "color-format", COLOR_FORMAT_YUV420_SEMIPLANAR);
-        AMediaFormat_setInt32(enc_fmt, "bitrate-mode", 1); /* VBR */
+        /* CBR makes Qualcomm's encoder honor low VA-API targets instead of
+         * falling back to its quality-based floor in VBR mode. */
+        AMediaFormat_setInt32(enc_fmt, "bitrate-mode", 2); /* CBR */
         AMediaFormat_setInt32(enc_fmt, "max-bframes", 0);
         AMediaFormat_setInt32(enc_fmt, "low-latency", 1);
 
