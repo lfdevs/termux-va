@@ -101,6 +101,7 @@
 #define MAX_ENCODE_PACKET  (64u * 1024u * 1024u)
 
 /* MediaCodec buffer flags (not every NDK version exports these constants) */
+#define FLAG_KEY_FRAME     1
 #define FLAG_CODEC_CONFIG  2
 #define FLAG_END_OF_STREAM 4
 
@@ -333,6 +334,7 @@ static const char *codec_mime(int id)
     case CODEC_AV1:  return "video/av01";
     case CODEC_H264_ENC: return "video/avc";
     case CODEC_HEVC_ENC: return "video/hevc";
+    case CODEC_VP9_ENC:  return "video/x-vnd.on2.vp9";
     default:         return NULL;
     }
 }
@@ -1723,6 +1725,23 @@ static int encoder_append_csd(uint8_t **csd, size_t *csd_len,
     return 0;
 }
 
+/* Some Pixel/Exynos VP9 MediaCodec encoders prepend a private key-frame
+ * header before the normal VP9 frame.  Locate the mandatory VP9 sync code so
+ * the daemon exposes a standards-compliant access unit to VA-API clients.
+ * The prefix length is device-specific, so do not hard-code it. */
+static size_t vp9_keyframe_prefix(const uint8_t *data, size_t len)
+{
+    if (!data || len < 4)
+        return 0;
+    size_t limit = len < 64 ? len - 3 : 61;
+    for (size_t i = 0; i < limit; i++) {
+        if ((data[i] & 0x03) == 0x02 && data[i + 1] == 0x49 &&
+            data[i + 2] == 0x83 && data[i + 3] == 0x42)
+            return i;
+    }
+    return 0;
+}
+
 static int encoder_drain_output(Session *s, uint8_t **csd, size_t *csd_len,
                                 size_t *csd_cap, bool *packet_sent,
                                 uint32_t pts)
@@ -1749,16 +1768,37 @@ static int encoder_drain_output(Session *s, uint8_t **csd, size_t *csd_len,
                  s->id, off, len, osz);
             rc = -1;
         } else if (info.flags & FLAG_CODEC_CONFIG) {
-            rc = encoder_append_csd(csd, csd_len, csd_cap, ob + off, len);
+            /* VP9 has no codec-config access unit in the IVF/VA-API path.
+             * Pixel's Exynos component reports a short private header here;
+             * forwarding it would make the first VP9 frame undecodable. */
+            if (s->codec_id == CODEC_VP9_ENC) {
+                dlog(1, "[%d] dropped VP9 codec-config buffer: %zu bytes",
+                     s->id, len);
+                rc = 0;
+            } else {
+                rc = encoder_append_csd(csd, csd_len, csd_cap, ob + off, len);
+            }
         } else if (len) {
-            size_t total = len + *csd_len;
+            const uint8_t *payload = ob + off;
+            size_t payload_len = len;
+            if (s->codec_id == CODEC_VP9_ENC && s->frames_out == 0 &&
+                (info.flags & FLAG_KEY_FRAME)) {
+                size_t prefix = vp9_keyframe_prefix(payload, payload_len);
+                if (prefix) {
+                    payload += prefix;
+                    payload_len -= prefix;
+                    dlog(1, "[%d] stripped VP9 key-frame prefix: %zu bytes",
+                         s->id, prefix);
+                }
+            }
+            size_t total = payload_len + *csd_len;
             uint8_t *packet = malloc(total);
             if (!packet)
                 rc = -1;
             else {
                 if (*csd_len)
                     memcpy(packet, *csd, *csd_len);
-                memcpy(packet + *csd_len, ob + off, len);
+                memcpy(packet + *csd_len, payload, payload_len);
                 rc = encoder_send_packet(s, packet, total,
                                          (uint32_t)info.flags, pts);
                 free(packet);
