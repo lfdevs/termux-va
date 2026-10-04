@@ -66,6 +66,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dlfcn.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>  /* htonl/ntohl: byte order of the wire format only */
@@ -86,7 +87,9 @@
 #include <stddef.h>
 #include <sys/time.h>
 #include <time.h>
+#include <stdbool.h>
 #include <linux/memfd.h>
+#include <android/api-level.h>
 #include <media/NdkMediaCodec.h>
 #include <media/NdkMediaFormat.h>
 
@@ -171,6 +174,42 @@ static void dlog(int lvl, const char *fmt, ...)
     /* flush info-and-above immediately; debug level stays buffered */
     if (lvl <= 1) fflush(stderr);
     pthread_mutex_unlock(&log_lock);
+}
+
+/* Android 15 and newer require an application-side Binder thread pool for
+ * Codec2 callbacks.  Resolve the NDK Binder entry points dynamically so the
+ * daemon remains loadable on older releases while matching FFmpeg's
+ * MediaCodec initialization path. */
+static void android_binder_threadpool_init(void)
+{
+#if defined(__ANDROID__)
+#if __ANDROID_API__ >= 24
+    if (android_get_device_api_level() < 35)
+        return;
+#endif
+    typedef bool (*set_max_threads_fn)(uint32_t);
+    typedef void (*start_thread_pool_fn)(void);
+
+    void *handle = dlopen("libbinder_ndk.so", RTLD_NOW | RTLD_LOCAL);
+    if (!handle) {
+        dlog(1, "Binder thread pool unavailable: %s", dlerror());
+        return;
+    }
+
+    set_max_threads_fn set_max = (set_max_threads_fn)dlsym(
+        handle, "ABinderProcess_setThreadPoolMaxThreadCount");
+    start_thread_pool_fn start = (start_thread_pool_fn)dlsym(
+        handle, "ABinderProcess_startThreadPool");
+    if (!start) {
+        dlog(2, "ABinderProcess_startThreadPool unavailable");
+        return;
+    }
+    if (set_max)
+        dlog(2, "ABinderProcess_setThreadPoolMaxThreadCount(1) => %s",
+             set_max(1) ? "ok" : "fail");
+    start();
+    dlog(2, "ABinderProcess_startThreadPool() called");
+#endif
 }
 
 /* ----------------------------------------------------------- exit control */
@@ -2171,6 +2210,8 @@ int main(int argc, char **argv)
     signal(SIGINT,  on_signal);
     signal(SIGTERM, on_signal);
     signal(SIGPIPE, SIG_IGN);
+
+    android_binder_threadpool_init();
 
     if (pipe(wakefd) < 0) {
         int pipe_errno = errno;
