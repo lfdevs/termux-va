@@ -65,7 +65,7 @@ vainfo
 ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi -i in.mp4 -f null -
 ```
 
-将 `TERMUX_VA_GPU_BACKEND` 改为 `sw` 可强制 Mesa 使用 llvmpipe 的 surface 和帧拷贝路径；这不会关闭 Termux daemon 中的 MediaCodec 解码。Mesa bridge 对外声明解码 AVC（Constrained Baseline/Main/High）、HEVC Main、VP9 Profile 0 和 AV1 Main，并声明 AVC 与 HEVC slice 编码。实际可用的 profile 仍由设备上的 MediaCodec 实现决定。
+将 `TERMUX_VA_GPU_BACKEND` 改为 `sw` 可强制 Mesa 使用 llvmpipe 的 surface 和帧拷贝路径；这不会关闭 Termux daemon 中的 MediaCodec 解码。Mesa bridge 对外声明解码 AVC（Constrained Baseline/Main/High）、HEVC Main、VP9 Profile 0 和 AV1 Main，并声明 AVC（Constrained Baseline/Main/High）、HEVC 与 VP9 slice 编码。显式 AVC profile 需要同时更新 daemon 与 Mesa bridge；Baseline 请求使用兼容的 Constrained Baseline 子集，并核对输出 SPS，防止静默替换 profile。实际可用的 profile 仍由设备上的 MediaCodec 实现决定。
 
 完整部署手册见 [doc/deploy_zh.md](doc/deploy_zh.md)，线路协议见 [doc/protocol_zh.md](doc/protocol_zh.md)。
 

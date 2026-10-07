@@ -65,7 +65,7 @@ vainfo
 ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi -i in.mp4 -f null -
 ```
 
-Set `TERMUX_VA_GPU_BACKEND=sw` instead to force Mesa's llvmpipe surface and frame-copy path; this does not disable MediaCodec decoding in the Termux daemon. The bridge advertises AVC (Constrained Baseline/Main/High), HEVC Main, VP9 Profile 0 and AV1 Main for decode, plus AVC and HEVC slice encoding. The device's MediaCodec implementation still determines which advertised profiles are available at runtime.
+Set `TERMUX_VA_GPU_BACKEND=sw` instead to force Mesa's llvmpipe surface and frame-copy path; this does not disable MediaCodec decoding in the Termux daemon. The bridge advertises AVC (Constrained Baseline/Main/High), HEVC Main, VP9 Profile 0 and AV1 Main for decode, plus AVC (Constrained Baseline/Main/High), HEVC and VP9 slice encoding. Explicit AVC profiles require the updated daemon and Mesa bridge; Baseline requests use the compatible Constrained Baseline subset, and output SPS headers are checked to prevent silent profile substitution. The device's MediaCodec implementation still determines which advertised profiles are available at runtime.
 
 See [doc/deploy.md](doc/deploy.md) for the full deployment manual and [doc/protocol.md](doc/protocol.md) for the wire protocol.
 

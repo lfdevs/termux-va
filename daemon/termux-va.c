@@ -316,25 +316,22 @@ static size_t shm_slot_bytes(int w, int h)
     return sz < 64 * 1024 ? 64 * 1024 : sz;
 }
 
-/* MIME of each supported hardware decoder (see upstream
+/* MIME of each supported decoder or encoder (see upstream
  * doc/verified-platform-facts.md for the capability matrix).
  *
  * This is a static id->MIME mapping only; it does not mean the device has
  * the corresponding hardware.  AV1 needs an Iris-class decoder (Snapdragon
  * 8 Elite tier); SM8150 has no such unit.  Actual availability is decided
- * by MediaCodec at configure time - failing to obtain a decoder fails the
- * handshake, which is the intended behavior; no per-device branching here. */
+ * by MediaCodec at configure time - failing to obtain a codec fails the
+ * session, which is the intended behavior; no per-device branching here. */
 static const char *codec_mime(int id)
 {
-    switch (id) {
+    switch (codec_base_id(id)) {
     case CODEC_H264: return "video/avc";
     case CODEC_HEVC: return "video/hevc";
     case CODEC_VP9:  return "video/x-vnd.on2.vp9";
     case CODEC_VP8:  return "video/x-vnd.on2.vp8";
     case CODEC_AV1:  return "video/av01";
-    case CODEC_H264_ENC: return "video/avc";
-    case CODEC_HEVC_ENC: return "video/hevc";
-    case CODEC_VP9_ENC:  return "video/x-vnd.on2.vp9";
     default:         return NULL;
     }
 }
@@ -462,6 +459,7 @@ typedef struct {
     uint32_t         bitrate;          /* encoder target, bits per second */
     uint32_t         fps_num;          /* encoder input frame rate */
     uint32_t         fps_den;
+    int              avc_profile_verified; /* explicit profile matched an output SPS */
     int              negotiated;       /* 1 = client completed the handshake */
 
     /* output format details (written by the output thread only) */
@@ -592,7 +590,10 @@ static int do_handshake(Session *s)
         }
         fps_num = ntohl(rate[0]);
         fps_den = ntohl(rate[1]);
-        if (!fps_num || !fps_den || fps_num > 1000 || fps_den > 1000) {
+        /* Validate the rate, not the individual rational terms: common
+         * rates such as 30000/1001 and 60000/1001 exceed 1000 in both fields. */
+        if (!fps_num || !fps_den || (uint64_t)fps_num > (uint64_t)fps_den * 1000 ||
+            (uint64_t)fps_num * 1000 < fps_den) {
             dlog(1, "[%d] encoder frame rate %u/%u is out of range, using 30/1",
                  s->id, fps_num, fps_den);
             fps_num = 30;
@@ -1683,11 +1684,65 @@ static void client_release(void)
  * on the target have no B-frame requirement when max-bframes=0, so one output
  * packet is available for each input frame.
  */
+static int encoder_avc_profile(int codec_id)
+{
+    /* MediaCodecInfo.CodecProfileLevel values, also used by FFmpeg. */
+    switch (codec_id) {
+    /* VA-API advertises Constrained Baseline; it is also a valid subset
+     * for WebCodecs callers requesting ordinary Baseline. */
+    case CODEC_H264_BASELINE_ENC: return 0x10000;
+    case CODEC_H264_MAIN_ENC:     return 0x02;
+    case CODEC_H264_HIGH_ENC:     return 0x08;
+    default:                    return 0;
+    }
+}
+
+static int encoder_validate_avc_profile(Session *s, const uint8_t *data, size_t len)
+{
+    int requested = encoder_avc_profile(s->codec_id);
+    if (!requested)
+        return 0;
+
+    int expected = requested == 0x10000 ? 66 : requested == 0x02 ? 77 : 100;
+    /* Inspect SPS headers in codec-config buffers and in-band access units.
+     * profile_idc precedes any Exp-Golomb/RBSP data, so no bit parser or
+     * emulation-prevention removal is needed here. */
+    for (size_t i = 0; i + 4 < len; i++) {
+        if (data[i] || data[i + 1] || data[i + 2] != 1 ||
+            (data[i + 3] & 0x1f) != 7)
+            continue;
+        int actual = data[i + 4];
+        if (actual != expected) {
+            dlog(0, "[%d] encoder ignored AVC profile: requested profile_idc=%d, got=%d",
+                 s->id, expected, actual);
+            return -1;
+        }
+        if (requested == 0x10000 && (i + 5 >= len || !(data[i + 5] & 0x40))) {
+            dlog(0, "[%d] encoder returned Baseline without the constrained-baseline flag",
+                 s->id);
+            return -1;
+        }
+        if (!s->avc_profile_verified)
+            dlog(1, "[%d] verified AVC SPS profile_idc=%d", s->id, actual);
+        s->avc_profile_verified = 1;
+    }
+    return 0;
+}
+
 static int encoder_send_packet(Session *s, const uint8_t *data, size_t len,
                                uint32_t flags, uint32_t pts)
 {
     if (!len || len > MAX_ENCODE_PACKET)
         return -1;
+    /* Also validate assembled codec-config fragments before forwarding the
+     * first access unit. A successful configure is not proof that the device
+     * honored the requested profile. */
+    if (encoder_validate_avc_profile(s, data, len) < 0)
+        return -1;
+    if (encoder_avc_profile(s->codec_id) && !s->avc_profile_verified) {
+        dlog(0, "[%d] encoder returned no SPS for the explicit AVC profile", s->id);
+        return -1;
+    }
 
     uint32_t hdr[3] = { htonl((uint32_t)len), htonl(flags), htonl(pts) };
     if (send_all(s->fd, hdr, sizeof(hdr)) < 0)
@@ -1766,6 +1821,8 @@ static int encoder_drain_output(Session *s, uint8_t **csd, size_t *csd_len,
         if (!ob || off > osz || len > osz - off) {
             dlog(0, "[%d] encoder output range invalid: offset=%zu size=%zu buffer=%zu",
                  s->id, off, len, osz);
+            rc = -1;
+        } else if (encoder_validate_avc_profile(s, ob + off, len) < 0) {
             rc = -1;
         } else if (info.flags & FLAG_CODEC_CONFIG) {
             /* VP9 has no codec-config access unit in the IVF/VA-API path.
@@ -1861,9 +1918,12 @@ static int encoder_run(Session *s)
          * convention) would look like a 1000-fps stream and makes bitrate
          * control ineffective.  Match the input rate negotiated in the
          * handshake; the bridge does not use this value for container PTS. */
-        int64_t frame_duration_us =
-            ((int64_t)1000000 * s->fps_den + s->fps_num / 2) / s->fps_num;
-        int64_t pts_us = (int64_t)pts * frame_duration_us;
+        /* Round the absolute timestamp instead of accumulating a rounded
+         * frame duration. Split the division to avoid overflow for valid
+         * uint32 rational terms and long-running sessions. */
+        uint64_t scaled = (uint64_t)pts * 1000000;
+        int64_t pts_us = (int64_t)((scaled / s->fps_num) * s->fps_den +
+            ((scaled % s->fps_num) * s->fps_den + s->fps_num / 2) / s->fps_num);
         if (AMediaCodec_queueInputBuffer(s->codec, bi, 0, sz,
                                          pts_us, 0) != AMEDIA_OK)
             break;
@@ -1924,10 +1984,12 @@ static void *session_thread(void *arg)
          * the old 8 Mbps value only for clients that leave the field zero. */
         int bitrate = s->bitrate ? (int)s->bitrate : 8 * 1000 * 1000;
         AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_BIT_RATE, bitrate);
-        int frame_rate = (int)(((uint64_t)s->fps_num + s->fps_den / 2) /
-                               s->fps_den);
-        AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_FRAME_RATE,
-                              frame_rate > 0 ? frame_rate : 30);
+        if (s->fps_num % s->fps_den == 0)
+            AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_FRAME_RATE,
+                                  (int)(s->fps_num / s->fps_den));
+        else
+            AMediaFormat_setFloat(enc_fmt, AMEDIAFORMAT_KEY_FRAME_RATE,
+                                  (float)s->fps_num / s->fps_den);
         AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_I_FRAME_INTERVAL, 1);
         AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_MAX_INPUT_SIZE, MAX_FRAME);
         /* Qualcomm's byte-buffer encoders accept semi-planar NV12. */
@@ -1937,6 +1999,11 @@ static void *session_thread(void *arg)
         AMediaFormat_setInt32(enc_fmt, "bitrate-mode", 2); /* CBR */
         AMediaFormat_setInt32(enc_fmt, "max-bframes", 0);
         AMediaFormat_setInt32(enc_fmt, "low-latency", 1);
+        int avc_profile = encoder_avc_profile(s->codec_id);
+        if (avc_profile) {
+            AMediaFormat_setInt32(enc_fmt, "profile", avc_profile);
+            dlog(1, "[%d] requested AVC MediaCodec profile=%d", s->id, avc_profile);
+        }
 
         s->codec = AMediaCodec_createEncoderByType(s->mime);
         if (!s->codec) {

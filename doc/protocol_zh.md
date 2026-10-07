@@ -19,8 +19,9 @@
 ```
 
 - `version`：客户端声明的协议版本。daemon 接受 `2..3` 并取最小值。版本语义：v2 增加 SHM 协商，v3 在响应中增加 endpoint 扩展。
-- `codec`：`0=AVC (video/avc), 1=HEVC (video/hevc), 2=VP9, 3=VP8, 4=AV1 (video/av01), 5=AVC 编码器, 6=HEVC 编码器`。
-- 编码会话使用内联传输，在同一个握手和 socket 上交换打包的 NV12 帧与 Annex B 编码访问单元；编码会话不会发送解码格式描述块。
+- `codec`：`0=AVC (video/avc), 1=HEVC (video/hevc), 2=VP9, 3=VP8, 4=AV1 (video/av01), 5=旧 AVC 编码器（设备默认 profile）, 6=HEVC 编码器, 7=VP9 编码器, 8=AVC Constrained Baseline 编码器, 9=AVC Main 编码器, 10=AVC High 编码器`。
+- 编码会话在六字握手后追加 `[u32 bitrate][u32 fps_num][u32 fps_den]`，使用 inline 传输，将打包 NV12 帧转换为 AVC/HEVC Annex B 访问单元或 VP9 帧包，不发送解码格式描述符。区分 AVC profile 的新 ID 保持原有九字编码握手布局；旧 daemon 对未知 ID 返回状态 2。显式 profile 需要同时更新 daemon 与 Mesa bridge；旧 ID 5 保留原来的设备默认行为。
+- 编码帧率为 `fps_num/fps_den`，分子、分母为非零 uint32，允许的比率为 0.001..1000 fps。`30000/1001`、`60000/1001` 等分数不再受单字段 1000 的限制。daemon 对分数帧率使用浮点 MediaCodec 帧率提示，并按分数计算绝对输入时间戳，避免逐帧取整累积误差。非法帧率仍按原有行为回退到 30/1。
 - `宽/高`：初始分辨率，有效范围 96x96..8192x4320。
 - `xfer`：请求的帧回传方式，`0=内联`，`1=SHM`。
 
@@ -103,7 +104,7 @@ SHM 交接失败时双方都自动降级为内联，没有硬失败路径。
 
 ## 编码会话
 
-对于 codec ID 5 和 6，上行单元是协商宽高对应的打包 NV12 帧：
+对于编码 codec ID 5 至 10，上行单元是协商宽高对应的打包 NV12 帧：
 
 ```
 [u32 长度][Y 平面][交错 UV 平面]
@@ -112,10 +113,12 @@ SHM 交接失败时双方都自动降级为内联，没有硬失败路径。
 daemon 为每一帧返回一个编码访问单元：
 
 ```
-[u32 长度][u32 flags][u32 unit_index][Annex B 访问单元]
+[u32 长度][u32 flags][u32 unit_index][编码访问单元]
 ```
 
 `flags` 会在适用时携带 `FLAG_KEY_FRAME` 和 `FLAG_CODEC_CONFIG`。第一个数据包包含独立 Annex B 码流所需的编码配置 NAL 单元。上行长度为零表示请求结束输入流。
+
+AVC ID 8 请求 Android Constrained Baseline（兼容 Baseline 的子集），ID 9 请求 Main，ID 10 请求 High。daemon 在转发数据前核对输出 SPS；如果 MediaCodec 忽略 profile 请求，则终止会话。可以运行 `python3 tools/test_encode.py --profile baseline --output baseline.h264`（或选择 `main`、`high`、`legacy`）验证实际 SPS 与输出包数。
 
 ## 会话结束
 
