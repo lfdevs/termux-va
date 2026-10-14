@@ -1,4 +1,4 @@
-# termux-va 线路协议（DMD v3）
+# termux-va 线路协议
 
 [English](protocol.md) | **中文**
 
@@ -63,7 +63,7 @@ daemon 在线路上始终提供线性 NV12。若 MediaCodec 返回平面式 YUV4
 - VP8 / VP9：整帧，**不带**起始码。
 - AV1：一个完整的 temporal unit，包含重建的 OBU 头和 tile group；关键 temporal unit 开头可以携带 sequence header。
 - `长度 == 0`：可逆排空请求（见下）。
-- `长度 > 8MB (MAX_FRAME)`：协议违规，会话结束。
+- 解码输入的 `长度 > 8MB (MAX_FRAME)`：协议违规，会话结束。
 
 daemon 为每个提交的 VCL 单元打标签 `presentationTimeUs = 单元序号 * 1000`（乘 1000 是为了在解码器按毫秒量化 PTS 后仍保持唯一）；该序号随对应的输出帧回传，消费者据此配对 surface，完全无需知道解码器的输出顺序。
 
@@ -110,6 +110,8 @@ SHM 交接失败时双方都自动降级为内联，没有硬失败路径。
 [u32 长度][Y 平面][交错 UV 平面]
 ```
 
+原始编码帧使用独立的 16 MiB 上限（`MAX_ENCODE_FRAME`），足以容纳 3840×2160 NV12。压缩解码输入仍保持 8 MiB 上限，消息布局和握手不变。编码超过 8 MiB 的原始帧时，需要同时更新 daemon 和 Mesa bridge，旧 daemon 会拒绝这些帧。NV12 在线路上仍为紧凑布局；daemon 根据 MediaCodec 返回的 stride 和 slice-height 填充编码输入缓冲区，包括 Exynos VP9 要求的对齐区域。
+
 daemon 为每一帧返回一个编码访问单元：
 
 ```
@@ -131,7 +133,8 @@ AVC ID 8 请求 Android Constrained Baseline（兼容 Baseline 的子集），ID
 | `HELLO_MAGIC` | `0x444D4400` | `common/tva_protocol.h` |
 | `HELLO_VERSION` | 3 | 同上 |
 | 接受的版本 | 2..3 | 同上 |
-| `MAX_FRAME` | 8 MiB（上行单元上限） | 同上 |
+| `MAX_FRAME` | 8 MiB（压缩解码输入上限） | 同上 |
+| `MAX_ENCODE_FRAME` | 16 MiB（原始 NV12 编码输入上限） | 同上 |
 | `MAX_CLIENTS` | 8 | 同上 |
 | `SHM_SLOTS` | 8 | 同上 |
 | `SHM_CTRL_BYTES` | 4096 | 同上 |

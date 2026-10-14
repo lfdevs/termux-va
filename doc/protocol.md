@@ -1,4 +1,4 @@
-# termux-va Wire Protocol (DMD v3)
+# termux-va Wire Protocol
 
 **English** | [中文](protocol_zh.md)
 
@@ -63,7 +63,7 @@ Exactly one unit per length prefix:
 - VP8 / VP9: one whole frame, **without** start codes.
 - AV1: one complete temporal unit containing reconstructed OBU headers and tile groups; sequence headers may be included at the start of a key temporal unit.
 - `length == 0`: reversible drain request (see below).
-- `length > 8MB (MAX_FRAME)`: protocol violation, session ends.
+- Decoder `length > 8MB (MAX_FRAME)`: protocol violation, session ends.
 
 The daemon tags every submitted VCL unit with `presentationTimeUs = unit_index * 1000` (the x1000 survives the decoder's millisecond PTS quantization); the index comes back on the matching output frame, which lets the consumer pair surfaces without knowing the decoder's output order.
 
@@ -110,6 +110,8 @@ For encoder codec IDs 5 through 10, the uplink unit is a packed NV12 frame with 
 [u32 length][Y plane][interleaved UV plane]
 ```
 
+Raw encoder frames have a separate 16 MiB cap (`MAX_ENCODE_FRAME`), sufficient for 3840×2160 NV12. Compressed decoder input keeps its 8 MiB cap. The framing and handshake are unchanged; update both the daemon and Mesa bridge to encode raw frames larger than 8 MiB, since older daemons reject them. NV12 stays tightly packed on the wire; the daemon copies it into the stride and slice-height layout returned by MediaCodec, including input padding required by Exynos VP9.
+
 The daemon returns one encoded access unit for each frame:
 
 ```
@@ -131,7 +133,8 @@ The client closes its write end (`shutdown(SHUT_WR)`); the daemon queues an EOS-
 | `HELLO_MAGIC` | `0x444D4400` | `common/tva_protocol.h` |
 | `HELLO_VERSION` | 3 | same |
 | accepted versions | 2..3 | same |
-| `MAX_FRAME` | 8 MiB (uplink unit cap) | same |
+| `MAX_FRAME` | 8 MiB (compressed decoder input cap) | same |
+| `MAX_ENCODE_FRAME` | 16 MiB (raw NV12 encoder input cap) | same |
 | `MAX_CLIENTS` | 8 | same |
 | `SHM_SLOTS` | 8 | same |
 | `SHM_CTRL_BYTES` | 4096 | same |

@@ -459,6 +459,8 @@ typedef struct {
     uint32_t         bitrate;          /* encoder target, bits per second */
     uint32_t         fps_num;          /* encoder input frame rate */
     uint32_t         fps_den;
+    int              encoder_stride;
+    int              encoder_slice_height;
     int              avc_profile_verified; /* explicit profile matched an output SPS */
     int              negotiated;       /* 1 = client completed the handshake */
 
@@ -1873,9 +1875,68 @@ static int encoder_drain_output(Session *s, uint8_t **csd, size_t *csd_len,
     }
 }
 
+/* MediaCodec byte-buffer input may have storage padding even when width and
+ * height describe the visible image. Exynos VP9 uses a 64-byte row stride
+ * and a 16-row slice height. Keep the wire tightly packed and honor the
+ * negotiated layout when copying into the codec-owned buffer. */
+static int encoder_copy_input(Session *s, uint8_t *dst, size_t capacity,
+                              const uint8_t *src, size_t length,
+                              size_t *queued_size)
+{
+    if (!s->encoder_stride) {
+        int32_t stride = 0, slice = 0, color = 0;
+        AMediaFormat *format = AMediaCodec_getInputFormat(s->codec);
+        if (format) {
+            AMediaFormat_getInt32(format, "stride", &stride);
+            AMediaFormat_getInt32(format, "slice-height", &slice);
+            AMediaFormat_getInt32(format, "color-format", &color);
+            AMediaFormat_delete(format);
+        }
+        if (color && color != COLOR_FORMAT_YUV420_SEMIPLANAR) {
+            dlog(0, "[%d] unsupported encoder input color format: 0x%x", s->id, color);
+            return -1;
+        }
+        s->encoder_stride = stride > 0 ? stride : (int)s->w;
+        s->encoder_slice_height = slice > 0 ? slice : (int)s->h;
+        dlog(1, "[%d] encoder input NV12 %ux%u stride=%d slice-height=%d",
+             s->id, s->w, s->h, s->encoder_stride, s->encoder_slice_height);
+    }
+
+    size_t width = s->w, height = s->h;
+    size_t stride = s->encoder_stride, slice = s->encoder_slice_height;
+    if ((width | height | stride | slice) & 1 || stride < width || slice < height ||
+        slice > SIZE_MAX / stride)
+        return -1;
+    size_t y_size = stride * slice;
+    /* CCodec's byte buffer includes padded luma rows, but its chroma plane
+     * ends at the last visible byte, without trailing row padding. */
+    size_t uv_size = stride * (height / 2 - 1) + width;
+    if (y_size > capacity || uv_size > capacity - y_size ||
+        length != width * height + width * (height / 2)) {
+        dlog(0, "[%d] encoder input layout does not fit: frame=%zu buffer=%zu",
+             s->id, length, capacity);
+        return -1;
+    }
+    if (stride == width && slice == height) {
+        memcpy(dst, src, length);
+        *queued_size = length;
+        return 0;
+    }
+    /* Initialize padding so stale buffer contents cannot affect the edges. */
+    memset(dst, 16, y_size);
+    memset(dst + y_size, 128, uv_size);
+    for (size_t y = 0; y < height; y++)
+        memcpy(dst + y * stride, src + y * width, width);
+    src += width * height;
+    for (size_t y = 0; y < height / 2; y++)
+        memcpy(dst + y_size + y * stride, src + y * width, width);
+    *queued_size = y_size + uv_size;
+    return 0;
+}
+
 static int encoder_run(Session *s)
 {
-    uint8_t *input = malloc(MAX_FRAME);
+    uint8_t *input = malloc(MAX_ENCODE_FRAME);
     uint8_t *csd = NULL;
     size_t csd_len = 0, csd_cap = 0;
     if (!input)
@@ -1889,7 +1950,7 @@ static int encoder_run(Session *s)
         uint32_t sz = ntohl(sz_be);
         if (sz == 0)
             break;
-        if (sz > MAX_FRAME || recv_all(s->fd, input, sz) < 0) {
+        if (sz > MAX_ENCODE_FRAME || recv_all(s->fd, input, sz) < 0) {
             dlog(1, "[%d] invalid encoder input frame size: %u", s->id, sz);
             break;
         }
@@ -1911,7 +1972,9 @@ static int encoder_run(Session *s)
             dlog(1, "[%d] encoder input buffer too small: %u > %zu", s->id, sz, cap);
             break;
         }
-        memcpy(ib, input, sz);
+        size_t queued_size = 0;
+        if (encoder_copy_input(s, ib, cap, input, sz, &queued_size) < 0)
+            break;
         uint32_t pts = ++frame_no;
         /* Encoder input timestamps are only used by MediaCodec's rate
          * controller.  A unit index scaled by 1 ms (the decoder pairing
@@ -1924,7 +1987,7 @@ static int encoder_run(Session *s)
         uint64_t scaled = (uint64_t)pts * 1000000;
         int64_t pts_us = (int64_t)((scaled / s->fps_num) * s->fps_den +
             ((scaled % s->fps_num) * s->fps_den + s->fps_num / 2) / s->fps_num);
-        if (AMediaCodec_queueInputBuffer(s->codec, bi, 0, sz,
+        if (AMediaCodec_queueInputBuffer(s->codec, bi, 0, queued_size,
                                          pts_us, 0) != AMEDIA_OK)
             break;
 
@@ -1991,7 +2054,7 @@ static void *session_thread(void *arg)
             AMediaFormat_setFloat(enc_fmt, AMEDIAFORMAT_KEY_FRAME_RATE,
                                   (float)s->fps_num / s->fps_den);
         AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_I_FRAME_INTERVAL, 1);
-        AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_MAX_INPUT_SIZE, MAX_FRAME);
+        AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_MAX_INPUT_SIZE, MAX_ENCODE_FRAME);
         /* Qualcomm's byte-buffer encoders accept semi-planar NV12. */
         AMediaFormat_setInt32(enc_fmt, "color-format", COLOR_FORMAT_YUV420_SEMIPLANAR);
         /* CBR makes Qualcomm's encoder honor low VA-API targets instead of
@@ -2010,6 +2073,12 @@ static void *session_thread(void *arg)
             dlog(0, "[%d] no available encoder: %s", s->id, s->mime);
             AMediaFormat_delete(enc_fmt);
             goto out_fd;
+        }
+        char *encoder_name = NULL;
+        if (AMediaCodec_getName(s->codec, &encoder_name) == AMEDIA_OK &&
+            encoder_name) {
+            dlog(1, "[%d] selected encoder: %s", s->id, encoder_name);
+            AMediaCodec_releaseName(s->codec, encoder_name);
         }
         media_status_t st = AMediaCodec_configure(s->codec, enc_fmt, NULL, NULL, 1);
         if (st != AMEDIA_OK) {

@@ -6,7 +6,7 @@
 
 从 Termux 向 Linux 容器提供 MediaCodec 硬件视频解码能力。
 
-`termux-va` 是 [DroidSpaces Media Decode Daemon](https://github.com/Re-s/droidspaces-media-decode/tree/143610b816da5c612c325a2170dbc5621b5ce1eb) 的 Termux 移植版：一个小型 C 守护进程，通过 Unix socket 接收 AVC/HEVC/VP8/VP9/AV1 码流，用 Android MediaCodec API 硬件解码，回传 NV12 帧（内联传输，或经 memfd 槽位池零拷贝）；同时接收打包的 NV12 帧，使用硬件进行 AVC 和 HEVC 编码。与 Termux 共享 tmp 目录的 Linux 容器内的应用通过标准 VA-API 使用它，无需任何改动：ffmpeg、Firefox、Chrome 均可用。
+`termux-va` 是 [DroidSpaces Media Decode Daemon](https://github.com/Re-s/droidspaces-media-decode/tree/143610b816da5c612c325a2170dbc5621b5ce1eb) 的 Termux 移植版：一个小型 C 守护进程，通过 Unix socket 接收 AVC/HEVC/VP9/AV1 码流，用 Android MediaCodec API 硬件解码，回传 NV12 帧（内联传输，或经 memfd 槽位池零拷贝）；同时接收打包的 NV12 帧，使用硬件进行 AVC、HEVC 和 VP9 编码。与 Termux 共享 tmp 目录的 Linux 容器内的应用通过标准 VA-API 使用它，无需任何改动：ffmpeg、Firefox、Chrome 均可用。
 
 ## 整体结构
 

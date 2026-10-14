@@ -147,8 +147,11 @@ typedef enum {
 
 /* ------------------------------------------------------------------ limits */
 
-/* Hard cap of one input unit (4-byte length prefix + data). */
+/* Hard cap of one compressed decoder input unit. */
 #define MAX_FRAME (8 * 1024 * 1024)
+/* Packed NV12 encoder inputs need 12.4 MB at 3840x2160. The framing is
+ * unchanged; both endpoints must be updated for raw frames over 8 MiB. */
+#define MAX_ENCODE_FRAME (16 * 1024 * 1024)
 
 /* Max concurrent decode sessions the daemon accepts (hardware supports 16). */
 #define MAX_CLIENTS 8
