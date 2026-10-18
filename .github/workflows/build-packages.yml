@@ -1,0 +1,179 @@
+name: Build Termux:VA packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to build
+        type: string
+        required: true
+        default: main
+      draft-release:
+        description: Create a draft release
+        type: boolean
+        required: false
+        default: false
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    outputs:
+      is_tag: ${{ steps.ref-info.outputs.is_tag }}
+      tag_name: ${{ steps.ref-info.outputs.tag_name }}
+    steps:
+      - name: Validate ref input
+        env:
+          REF: ${{ inputs.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$REF" == refs/* ]]; then
+            git check-ref-format "$REF"
+          else
+            git check-ref-format --branch "$REF"
+          fi
+
+      - name: Check out termux-va
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          path: termux-va
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out termux-packages build scripts
+        uses: actions/checkout@v7
+        with:
+          repository: termux/termux-packages
+          ref: master
+          path: termux-packages
+          persist-credentials: false
+
+      - name: Detect tag ref
+        id: ref-info
+        working-directory: termux-va
+        env:
+          REF: ${{ inputs.ref }}
+          DRAFT_RELEASE: ${{ inputs['draft-release'] }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "$REF" in
+            refs/tags/*)
+              tag_name="${REF#refs/tags/}"
+              ;;
+            refs/*)
+              tag_name=""
+              ;;
+            *)
+              tag_name="$REF"
+              # A plain ref that checked out as a branch is not a release tag.
+              if [[ "$(git branch --show-current)" == "$REF" ]]; then
+                tag_name=""
+              fi
+              ;;
+          esac
+
+          if [[ -n "$tag_name" ]] && git show-ref --verify --quiet "refs/tags/$tag_name"; then
+            echo "is_tag=true" >> "$GITHUB_OUTPUT"
+            echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
+            echo "Resolved $REF to tag $tag_name"
+          else
+            echo "is_tag=false" >> "$GITHUB_OUTPUT"
+            echo "tag_name=" >> "$GITHUB_OUTPUT"
+            if [[ "$DRAFT_RELEASE" == "true" ]]; then
+              echo "::notice::Draft release requested, but '$REF' is not a tag; release creation will be skipped."
+            fi
+          fi
+
+      - name: Build aarch64 package
+        working-directory: termux-packages
+        env:
+          TERMUX_DOCKER_RUN_EXTRA_ARGS: --volume ${{ github.workspace }}/termux-va:/home/builder/termux-va:ro
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/run-docker.sh ./build-package.sh -I -f -a aarch64 -j 4 ../termux-va/packages/termux-va
+
+      - name: Stage package and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          package_paths=(termux-packages/output/termux-va_*_aarch64.deb)
+          if [[ ${#package_paths[@]} -ne 1 ]]; then
+            printf 'Expected exactly one aarch64 termux-va package, found %s\n' "${#package_paths[@]}" >&2
+            exit 1
+          fi
+          package_name="$(basename -- "${package_paths[0]}")"
+          test -s "${package_paths[0]}"
+
+          artifact_dir="$GITHUB_WORKSPACE/artifacts"
+          mkdir -p "$artifact_dir"
+          cp -- "${package_paths[0]}" "$artifact_dir/$package_name"
+          (
+            cd "$artifact_dir"
+            sha256sum -- "$package_name" > sha256sums.txt
+          )
+          cat "$artifact_dir/sha256sums.txt"
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: termux-va_${{ inputs.ref }}_${{ github.run_id }}
+          path: |
+            artifacts/termux-va_*_aarch64.deb
+            artifacts/sha256sums.txt
+          if-no-files-found: error
+          compression-level: 0
+
+  draft-release:
+    needs: build
+    if: ${{ inputs['draft-release'] && needs.build.outputs.is_tag == 'true' }}
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download package artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: termux-va_${{ inputs.ref }}_${{ github.run_id }}
+          path: artifacts
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ needs.build.outputs.tag_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          package_paths=(artifacts/termux-va_*_aarch64.deb)
+          if [[ ${#package_paths[@]} -ne 1 ]]; then
+            printf 'Expected exactly one aarch64 termux-va package artifact, found %s\n' "${#package_paths[@]}" >&2
+            exit 1
+          fi
+          package_name="$(basename -- "${package_paths[0]}")"
+          (
+            cd artifacts
+            sha256sum --check sha256sums.txt
+          )
+
+          {
+            printf '## Checksums\n```text\n'
+            cat artifacts/sha256sums.txt
+            printf '```\n'
+          } > release-notes.md
+
+          gh release create "$TAG_NAME" \
+            "artifacts/$package_name" \
+            --draft \
+            --verify-tag \
+            --title "Termux:VA $TAG_NAME" \
+            --notes-file release-notes.md
