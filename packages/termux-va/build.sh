@@ -1,5 +1,5 @@
 TERMUX_PKG_HOMEPAGE=https://github.com/lfdevs/termux-va
-TERMUX_PKG_DESCRIPTION="MediaCodec hardware decode daemon for Termux"
+TERMUX_PKG_DESCRIPTION="MediaCodec hardware decode and encode bridge for Termux"
 TERMUX_PKG_LICENSE="GPL-3.0"
 TERMUX_PKG_MAINTAINER="@lfdevs"
 TERMUX_PKG_VERSION="0.1.0"
@@ -33,5 +33,4 @@ termux_step_make_install() {
 	install -Dm700 "$repo_root/scripts/termux-va-start.sh" "$TERMUX_PREFIX/bin/termux-va-start"
 	install -Dm700 "$repo_root/scripts/termux-va-stop.sh" "$TERMUX_PREFIX/bin/termux-va-stop"
 	install -Dm700 "$repo_root/scripts/termux-va-watchdog.sh" "$TERMUX_PREFIX/bin/termux-va-watchdog"
-	install -Dm644 "$repo_root/tools/test_decode.py" "$TERMUX_PREFIX/libexec/termux-va/test_decode.py"
 }
