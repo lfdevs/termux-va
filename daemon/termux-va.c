@@ -33,6 +33,8 @@
  *   7. Comments and log messages were translated to English.
  *   8. Planar MediaCodec YUV420 output is normalized to the protocol's NV12
  *      layout, including a direct SHM conversion path.
+ *   9. MediaFormat key names are passed as string literals to avoid runtime
+ *      dependencies on optional exported key variables.
  *
  * Everything else - the DMD v3 wire protocol, the MediaCodec session
  * lifecycle, the memfd/SCM_RIGHTS shared-memory handoff, the drain
@@ -92,6 +94,24 @@
 #include <android/api-level.h>
 #include <media/NdkMediaCodec.h>
 #include <media/NdkMediaFormat.h>
+
+/* MediaFormat keys are string literals in Android's MediaFormat API. Use
+ * them directly instead of importing AMEDIAFORMAT_KEY_* data symbols from
+ * libmediandk: some device builds do not export those variables even though
+ * the corresponding MediaFormat functions are available. */
+#define TVA_MF_KEY_BIT_RATE         "bitrate"
+#define TVA_MF_KEY_COLOR_FORMAT     "color-format"
+#define TVA_MF_KEY_DISPLAY_CROP     "crop"
+#define TVA_MF_KEY_FRAME_RATE       "frame-rate"
+#define TVA_MF_KEY_HEIGHT           "height"
+#define TVA_MF_KEY_I_FRAME_INTERVAL "i-frame-interval"
+#define TVA_MF_KEY_MAX_HEIGHT       "max-height"
+#define TVA_MF_KEY_MAX_INPUT_SIZE   "max-input-size"
+#define TVA_MF_KEY_MAX_WIDTH        "max-width"
+#define TVA_MF_KEY_MIME             "mime"
+#define TVA_MF_KEY_SLICE_HEIGHT     "slice-height"
+#define TVA_MF_KEY_STRIDE           "stride"
+#define TVA_MF_KEY_WIDTH            "width"
 
 #include "tva_protocol.h"
 
@@ -1587,8 +1607,8 @@ static void *output_thread(void *arg)
             AMediaFormat *of = AMediaCodec_getOutputFormat(s->codec);
             if (of) {
                 int w = s->w, h = s->h;
-                AMediaFormat_getInt32(of, AMEDIAFORMAT_KEY_WIDTH, &w);
-                AMediaFormat_getInt32(of, AMEDIAFORMAT_KEY_HEIGHT, &h);
+                AMediaFormat_getInt32(of, TVA_MF_KEY_WIDTH, &w);
+                AMediaFormat_getInt32(of, TVA_MF_KEY_HEIGHT, &h);
                 s->w = w; s->h = h;
 
                 /* stride / slice_height: the decoder output buffer's real
@@ -1596,16 +1616,16 @@ static void *output_thread(void *arg)
                  * to 128 and height to 32; without these values the UV
                  * plane offset cannot be located correctly. */
                 int stride = 0, slice = 0;
-                if (!AMediaFormat_getInt32(of, AMEDIAFORMAT_KEY_STRIDE, &stride))
+                if (!AMediaFormat_getInt32(of, TVA_MF_KEY_STRIDE, &stride))
                     stride = w;
-                if (!AMediaFormat_getInt32(of, AMEDIAFORMAT_KEY_SLICE_HEIGHT, &slice))
+                if (!AMediaFormat_getInt32(of, TVA_MF_KEY_SLICE_HEIGHT, &slice))
                     slice = h;
                 s->stride = stride;
                 s->slice_height = slice;
 
                 int32_t color_format = -1;
                 int have_color_format = AMediaFormat_getInt32(
-                    of, AMEDIAFORMAT_KEY_COLOR_FORMAT, &color_format);
+                    of, TVA_MF_KEY_COLOR_FORMAT, &color_format);
                 s->color_format = have_color_format ? (int)color_format : -1;
                 if (have_color_format &&
                     media_color_format_is_planar((int)color_format)) {
@@ -1627,7 +1647,7 @@ static void *output_thread(void *arg)
                  * 1080p decodes into a 1920x1088 buffer, crop_bottom is
                  * 1079 and the extra 8 rows are alignment padding. */
                 int cl = 0, ct = 0, cr = w - 1, cb = h - 1;
-                AMediaFormat_getRect(of, AMEDIAFORMAT_KEY_DISPLAY_CROP,
+                AMediaFormat_getRect(of, TVA_MF_KEY_DISPLAY_CROP,
                                      &cl, &ct, &cr, &cb);
                 s->crop_l = cl; s->crop_t = ct;
                 s->crop_r = cr; s->crop_b = cb;
@@ -2040,21 +2060,21 @@ static void *session_thread(void *arg)
             dlog(0, "[%d] AMediaFormat_new failed for encoder", s->id);
             goto out_fd;
         }
-        AMediaFormat_setString(enc_fmt, AMEDIAFORMAT_KEY_MIME, s->mime);
-        AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_WIDTH, s->w);
-        AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_HEIGHT, s->h);
+        AMediaFormat_setString(enc_fmt, TVA_MF_KEY_MIME, s->mime);
+        AMediaFormat_setInt32(enc_fmt, TVA_MF_KEY_WIDTH, s->w);
+        AMediaFormat_setInt32(enc_fmt, TVA_MF_KEY_HEIGHT, s->h);
         /* The VA frontend sends -b:v through the encoder handshake.  Keep
          * the old 8 Mbps value only for clients that leave the field zero. */
         int bitrate = s->bitrate ? (int)s->bitrate : 8 * 1000 * 1000;
-        AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_BIT_RATE, bitrate);
+        AMediaFormat_setInt32(enc_fmt, TVA_MF_KEY_BIT_RATE, bitrate);
         if (s->fps_num % s->fps_den == 0)
-            AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_FRAME_RATE,
+            AMediaFormat_setInt32(enc_fmt, TVA_MF_KEY_FRAME_RATE,
                                   (int)(s->fps_num / s->fps_den));
         else
-            AMediaFormat_setFloat(enc_fmt, AMEDIAFORMAT_KEY_FRAME_RATE,
+            AMediaFormat_setFloat(enc_fmt, TVA_MF_KEY_FRAME_RATE,
                                   (float)s->fps_num / s->fps_den);
-        AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_I_FRAME_INTERVAL, 1);
-        AMediaFormat_setInt32(enc_fmt, AMEDIAFORMAT_KEY_MAX_INPUT_SIZE, MAX_ENCODE_FRAME);
+        AMediaFormat_setInt32(enc_fmt, TVA_MF_KEY_I_FRAME_INTERVAL, 1);
+        AMediaFormat_setInt32(enc_fmt, TVA_MF_KEY_MAX_INPUT_SIZE, MAX_ENCODE_FRAME);
         /* Qualcomm's byte-buffer encoders accept semi-planar NV12. */
         AMediaFormat_setInt32(enc_fmt, "color-format", COLOR_FORMAT_YUV420_SEMIPLANAR);
         /* CBR makes Qualcomm's encoder honor low VA-API targets instead of
@@ -2100,10 +2120,10 @@ static void *session_thread(void *arg)
 
     fmt = AMediaFormat_new();
     if (!fmt) { dlog(0, "[%d] AMediaFormat_new failed", s->id); goto out_fd; }
-    AMediaFormat_setString(fmt, AMEDIAFORMAT_KEY_MIME, s->mime);
-    AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_WIDTH, s->w);
-    AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_HEIGHT, s->h);
-    AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_MAX_INPUT_SIZE, MAX_FRAME);
+    AMediaFormat_setString(fmt, TVA_MF_KEY_MIME, s->mime);
+    AMediaFormat_setInt32(fmt, TVA_MF_KEY_WIDTH, s->w);
+    AMediaFormat_setInt32(fmt, TVA_MF_KEY_HEIGHT, s->h);
+    AMediaFormat_setInt32(fmt, TVA_MF_KEY_MAX_INPUT_SIZE, MAX_FRAME);
 
     /* adaptive-playback: declare the largest size that may appear later so
      * the decoder pre-allocates its output pool accordingly and a
@@ -2112,8 +2132,8 @@ static void *session_thread(void *arg)
      * reconfiguration after all. */
     int max_w = s->w > 1920 ? s->w : 1920;
     int max_h = s->h > 1088 ? s->h : 1088;
-    AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_MAX_WIDTH,  max_w);
-    AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_MAX_HEIGHT, max_h);
+    AMediaFormat_setInt32(fmt, TVA_MF_KEY_MAX_WIDTH,  max_w);
+    AMediaFormat_setInt32(fmt, TVA_MF_KEY_MAX_HEIGHT, max_h);
 
     /* Low latency: make the decoder emit frames as soon as possible instead
      * of holding a few back to fill its pipeline.
