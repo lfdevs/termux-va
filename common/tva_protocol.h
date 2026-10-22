@@ -4,7 +4,7 @@
  * tva_protocol.h - Wire protocol constants shared by the termux-va daemon
  *                  (Termux side) and the Mesa termux-va bridge (container
  *                  side, mesa-for-android-container branch
- *                  test/add-va-bridge, file src/gallium/frontends/va/tva_protocol.h).
+ *                  dev/adreno-main, file src/gallium/frontends/va/tva_protocol.h).
  *
  * This file is the single source of truth for everything that travels on
  * the wire or must agree on both ends of the Unix socket. The two copies

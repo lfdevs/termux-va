@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # check-mirror.sh - verify that common/tva_protocol.h is byte-identical to
-# its mirror in the Mesa tree (mesa-for-android-container, branch
-# test/add-va-bridge).
+# its mirror in the Mesa tree (mesa-for-android-container).
 #
 # The mirror discipline is inherited from anland-termux: the wire protocol
 # has one source of truth, and every consumer keeps a cmp-verified copy.

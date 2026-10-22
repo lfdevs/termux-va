@@ -4,82 +4,41 @@
 
 ---
 
-从 Termux 向 Linux 容器提供 MediaCodec 硬件视频解码能力。
+通过 Mesa VA-API bridge 向 Linux 容器提供 Android MediaCodec 硬件视频解码和编码能力。
 
-`termux-va` 是 [DroidSpaces Media Decode Daemon](https://github.com/Re-s/droidspaces-media-decode/tree/143610b816da5c612c325a2170dbc5621b5ce1eb) 的 Termux 移植版：一个小型 C 守护进程，通过 Unix socket 接收 AVC/HEVC/VP9/AV1 码流，用 Android MediaCodec API 硬件解码，回传 NV12 帧（内联传输，或经 memfd 槽位池零拷贝）；同时接收打包的 NV12 帧，使用硬件进行 AVC、HEVC 和 VP9 编码。与 Termux 共享 tmp 目录的 Linux 容器内的应用通过标准 VA-API 使用它，无需任何改动：ffmpeg、Firefox、Chrome 均可用。
+## 特性
 
-## 整体结构
+- Termux:VA 自身的运行无需 Root 权限，同时支持 PRoot、Chroot、LXC 和 Droidspaces 容器。
+- 提供标准的 Mesa VA driver ABI，FFmpeg、Chromium、Firefox 等应用无需修改即可使用。
+- 相较于软件解码和编码，可在一定程度上降低 CPU 占用率。
+- 理论上支持 4K 60fps 乃至更高规格视频的硬件解码。
+- 支持 Android 10 及更高版本的系统。
 
-移植思路沿用 [anland-termux](https://github.com/lfdevs/anland-termux) 确立的模式：**Termux daemon + 共享 tmp 中的 Unix socket + 容器侧 bridge**。
+## 兼容性
 
-```
-   Linux 容器（proot --shared-tmp）                     Termux
-+---------------------------------------------+   +---------------------------+
-|  ffmpeg / Firefox / Chrome / vainfo          |   |  termux-va (NDK r29, C11) |
-|    libva -> Mesa VA 前端（桥接模式）           |   |  MediaCodec 硬解           |
-|      -> 经 Unix socket 的 DMD v3 协议 --------+---+-> NV12 帧                  |
-|         （内联，或 memfd + SCM_RIGHTS）        |   |                           |
-+---------------------------------------------+   +---------------------------+
-        socket: /tmp/termux-va/termux-va.sock == Termux $TMPDIR/termux-va/
-```
+在处理器支持的前提下，Termux:VA 目前支持以下的 SDR 视频格式：
 
-- **Daemon（本仓库）**：`daemon/termux-va.c`，对上游 `decode-daemon.c` 的忠实移植，并移除了 TCP 传输——只监听路径式 Unix socket。使用 NDK **29.0.14206865** 构建（与 anland-termux 钉死的版本一致），API 29，arm64-v8a。
-- **Mesa 桥（容器侧）**：位于 [mesa-for-android-container](https://github.com/lfdevs/mesa-for-android-container) 仓库的 `test/add-va-bridge` 分支（`src/gallium/frontends/va/tva_*`）。上游的独立伪 VA-API 驱动退役，桥在 Mesa 的 VA 前端内部使用同一线路协议。桥默认探测的 socket 是 `/tmp/termux-va/termux-va.sock`。
+| | AVC | HEVC | VP9 | AV1 |
+| :-: | :-: | :-: | :-: | :-: |
+| 解码 | ✔️ | ✔️ | ✔️ | ✔️ |
+| 编码 | ✔️ | ✔️ | ✔️ | ❌ |
 
-## 端点解析
+> [!NOTE]
+> 上表所列的视频格式为 Termux:VA 的理论能力，实际的支持情况仍取决于具体的处理器、应用、视频规格等。推荐在使用 Termux:VA 前先查阅[详细的兼容性文档](doc/compatibility_zh.md)。
 
-| 优先级 | 来源 | 含义 |
-|---|---|---|
-| 1 | `--sock <路径\|目录>` | 命令行覆盖（目录会得到 `termux-va.sock`） |
-| 2 | `TERMUX_VA_SOCKET` | 完整 socket 文件路径（双端） |
-| 3 | `TERMUX_VA_SOCKET_DIR` | 目录；自动拼接 `termux-va.sock`（双端） |
-| 4 | 默认 | `$TMPDIR/termux-va/termux-va.sock` |
+## 用户指南
 
-`$TMPDIR` 依次回退到 `/tmp`、`/data/data/com.termux/files/usr/tmp`；adb 注入的 `/data/local/tmp` 视为未设置。使用 `proot-distro --shared-tmp` 时，Termux 的默认路径在容器内就是 `/tmp/termux-va/termux-va.sock`—— 一条路径，两端通用。
+Termux:VA 的安装、使用方法请查阅[用户指南](doc/user-guide_zh.md)。
 
-## 构建
+## 其他文档
 
-```sh
-# 在装有 Android NDK 的主机上（正式发布构建）：
-ANDROID_NDK_HOME=$HOME/Android/Sdk/ndk/29.0.14206865 bash scripts/build-ndk.sh
+- [开发者指南](doc/developer-guide_zh.md)：系统结构、端点配置、构建、安装、部署、验证和故障排查。
+- [线路协议](doc/protocol_zh.md)：Socket 消息、codec ID、内联与 SHM 传输及协议兼容性。
 
-# 在 Termux 内（开发便利）：
-pkg install clang ndk-multilib
-make -C daemon
-```
+## 致谢
 
-## 运行
-
-```sh
-# Termux 内：
-termux-va-start.sh                 # 或：termux-va [-v|-q] [-t] [--sock <路径|目录>]
-
-# 带 shared tmp 进入容器：
-proot-distro login debian --shared-tmp
-
-# 容器内（Mesa 来自 mesa-for-android-container 的 test/add-va-bridge 分支）：
-export LIBVA_DRIVER_NAME=termuxva
-export TERMUX_VA_BRIDGE=1
-export TERMUX_VA_GPU_BACKEND=kgsl  # KGSL Freedreno 路径
-vainfo
-ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi -i in.mp4 -f null -
-```
-
-将 `TERMUX_VA_GPU_BACKEND` 改为 `sw` 可强制 Mesa 使用 llvmpipe 的 surface 和帧拷贝路径；这不会关闭 Termux daemon 中的 MediaCodec 解码。Mesa bridge 对外声明解码 AVC（Constrained Baseline/Main/High）、HEVC Main、VP9 Profile 0 和 AV1 Main，并声明 AVC（Constrained Baseline/Main/High）、HEVC 与 VP9 slice 编码。显式 AVC profile 需要同时更新 daemon 与 Mesa bridge；Baseline 请求使用兼容的 Constrained Baseline 子集，并核对输出 SPS，防止静默替换 profile。实际可用的 profile 仍由设备上的 MediaCodec 实现决定。
-
-完整部署手册见 [doc/deploy_zh.md](doc/deploy_zh.md)，线路协议见 [doc/protocol_zh.md](doc/protocol_zh.md)。
-
-## 仓库布局
-
-```
-common/tva_protocol.h   线路协议常量（镜像到 Mesa 桥）
-daemon/termux-va.c      守护进程
-daemon/Makefile         Termux 内构建入口
-scripts/                NDK 构建、生命周期与看护脚本、镜像校验
-tools/                  探活工具（tva-probe.c）、协议回归客户端（test_decode.py）
-packages/termux-va/     termux-packages 配方
-doc/                    协议与部署文档（中英双语）
-```
+- [DroidSpaces Media Decode Daemon](https://github.com/Re-s/droidspaces-media-decode/tree/143610b816da5c612c325a2170dbc5621b5ce1eb): 本项目基于它进行移植与扩展。
+- [FFmpeg](https://www.ffmpeg.org/): 世界上最知名的多媒体框架。它为本项目的实现提供了重要参考。
 
 ## 许可证
 
