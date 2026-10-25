@@ -276,9 +276,12 @@ The upstream baseline reports roughly four-times-realtime 720p30 decode over the
 | Socket directory disappears | Termux cleared temporary storage after service teardown. Restart the daemon; use termux-services for persistent operation. |
 | Daemon exits immediately | Check the daemon log for an existing process holding the `<socket>.lock` file or for MediaCodec initialization errors. |
 | Probe handshake succeeds but receives no frames (exit 8) | Inspect verbose daemon logs for codec configuration failures or repeated input-buffer exhaustion, and confirm the socket buffers are configured as expected. Confirm the device supports the stream profile and dimensions. |
+| `input buffers full` persists | A full MediaCodec input queue is backpressure, not proof that SHM slots are full. The daemon waits while codec output buffers are being returned. If no input buffer becomes available and output makes no progress for the stall interval, it closes that decoder session and releases its codec and SHM after both workers exit; the log includes the number of busy SHM slots. |
 | Container sees the daemon but GPU surfaces fail | Check the actual device node, Mesa build options, and `TERMUX_VA_GPU_BACKEND`; use `sw` to isolate DMA-BUF and KGSL issues from MediaCodec decoding. |
 
 Use `TERMUX_VA_LOG=/path/to/log` to choose the start-script log file, `TERMUX_VA_START_WAIT` to change its startup wait, and `termux-va -v -t` for detailed timestamped daemon logs. Keep the full daemon log and the failing input's codec, profile, level, dimensions, and frame rate when reporting a reproducible issue.
+
+`TERMUX_VA_STALL_TIMEOUT_MS` sets the decoder input stall interval and the socket send timeout, in milliseconds (default `15000`, accepted range `1000`–`600000`). For example, `TERMUX_VA_STALL_TIMEOUT_MS=15000 termux-va -t` uses 15 seconds. Returning an output buffer restarts the input stall timer; a completely closed peer cancels the session promptly. Idle sessions waiting for new input are not timed out, and a write-half close still requests normal EOS draining. Cleanup cancels only the affected session and wakes both workers before stopping/deleting MediaCodec and unmapping SHM. It does not forcibly reuse occupied slots or flush away reference frames; a failed session requires the application to reconnect/recreate its decoder. The separate SHM slot wait remains 15 seconds.
 
 ## Developer checklist
 

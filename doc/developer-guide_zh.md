@@ -276,9 +276,12 @@ python3 tools/test_decode.py clip.vp9.ivf vp9
 | Socket 目录消失 | Termux 在服务销毁后清除了临时目录。重启 daemon；长期运行建议使用 termux-services。 |
 | daemon 启动后立即退出 | 检查日志中是否有其他进程持有 `<socket>.lock`，或有 MediaCodec 初始化错误。 |
 | 探针握手成功但收不到帧（退出码 8） | 查看详细 daemon 日志中的 codec 配置错误或 input buffer 持续耗尽，并确认 Socket 缓冲区配置符合预期；同时确认设备支持该视频的 profile 和尺寸。 |
+| 持续出现 `input buffers full` | MediaCodec 输入队列满属于背压，不能据此认定 SHM 槽位已满。只要 codec 输出缓冲仍在归还，daemon 就继续等待；如果整个停滞期限内既无法取得输入缓冲，输出也没有进展，则关闭该解码会话，在双线程退出后释放 codec 和 SHM，并在日志中记录占用的 SHM 槽位数。 |
 | 容器能连接 daemon，但 GPU surface 失败 | 检查实际设备节点、Mesa 构建选项和 `TERMUX_VA_GPU_BACKEND`；用 `sw` 隔离 DMA-BUF/KGSL 问题与 MediaCodec 解码问题。 |
 
 使用 `TERMUX_VA_LOG=/path/to/log` 指定启动脚本日志文件，使用 `TERMUX_VA_START_WAIT` 调整启动等待时间，或用 `termux-va -v -t` 获取带时间戳的详细 daemon 日志。提交可复现问题时，请附上完整 daemon 日志及输入视频的 codec、profile、level、尺寸和帧率。
+
+`TERMUX_VA_STALL_TIMEOUT_MS` 设置解码器输入停滞期限和 Socket 发送超时，单位为毫秒，默认 `15000`，有效范围为 `1000`–`600000`。例如，`TERMUX_VA_STALL_TIMEOUT_MS=15000 termux-va -t` 使用 15 秒。每次归还输出缓冲会重新开始计算输入停滞时间；对端完全断连会及时取消会话。等待新输入的空闲会话不会因此超时，关闭写端仍表示正常 EOS 排空。清理只取消故障会话，先唤醒双线程，再停止并删除 MediaCodec、解除 SHM 映射；不会强制复用占用中的槽位或通过 flush 丢弃参考帧，失败后需要应用重新连接或重建解码器。独立的 SHM 槽位等待期限仍为 15 秒。
 
 ## 开发检查清单
 

@@ -35,6 +35,8 @@
  *      layout, including a direct SHM conversion path.
  *   9. MediaFormat key names are passed as string literals to avoid runtime
  *      dependencies on optional exported key variables.
+ *  10. Decoder backpressure waits track output progress; stalled or cancelled
+ *      sessions wake both workers before releasing MediaCodec and SHM.
  *
  * Everything else - the DMD v3 wire protocol, the MediaCodec session
  * lifecycle, the memfd/SCM_RIGHTS shared-memory handoff, the drain
@@ -77,6 +79,7 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include <pthread.h>
+#include <poll.h>
 #include <sys/select.h>
 #include <sys/un.h>
 #include <sys/stat.h>
@@ -117,6 +120,8 @@
 
 #define INPUT_TIMEOUT_US   5000000
 #define OUTPUT_TIMEOUT_US  20000
+#define INPUT_POLL_US      100000
+#define DEFAULT_STALL_MS   15000
 #define SEND_CHUNK         262144
 #define MAX_ENCODE_PACKET  (64u * 1024u * 1024u)
 
@@ -435,12 +440,15 @@ static int send_all(int fd, const void *b, size_t l)
         ssize_t n = write(fd, p, l);
         if (n < 0 && errno == EINTR) continue;
         if (n < 0) {
-            /* the socket is blocking with no SO_SNDTIMEO, so a full buffer
-             * blocks write() instead of returning an error; a returned
-             * error means the peer is in trouble */
+            /* Decoder sockets have a bounded send wait so an unresponsive
+             * consumer cannot pin codec buffers indefinitely. */
             if (errno == EPIPE || errno == ECONNRESET) {
                 dlog(2, "send_all: peer closed (%s)", strerror(errno));
                 return SEND_PEER_GONE;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                dlog(1, "send_all: receiver stalled (socket send timeout)");
+                return -1;
             }
             dlog(1, "send_all: write failed: %s", strerror(errno));
             return -1;
@@ -460,6 +468,8 @@ typedef struct {
     AMediaCodec     *codec;
     volatile sig_atomic_t stop;        /* set on any-direction error; both threads exit */
     volatile sig_atomic_t input_done;  /* input thread finished (EOS attempted) */
+    unsigned int     output_progress; /* atomic count of returned codec buffers */
+    int              stall_timeout_ms;
     int              w, h;             /* written by the output thread only */
     long             units_in;
     long             frames_out;
@@ -546,6 +556,97 @@ static inline volatile uint32_t *shm_slot_state(Session *s, int idx)
 static inline uint8_t *shm_slot_data(Session *s, int idx)
 {
     return s->shm_base + SHM_CTRL_BYTES + (size_t)idx * s->shm_slot;
+}
+
+/* A fatal worker exit must wake the other direction before the session
+ * owner joins either thread. Codec stop/delete and SHM teardown remain in
+ * the owner, after both workers have released their borrowed buffers. */
+static void session_abort(Session *s)
+{
+    s->stop = 1;
+    shutdown(s->fd, SHUT_RDWR);
+}
+
+static int decoder_stall_timeout(Session *s)
+{
+    const char *value = getenv("TERMUX_VA_STALL_TIMEOUT_MS");
+    if (!value || !*value)
+        return DEFAULT_STALL_MS;
+    char *end;
+    errno = 0;
+    long ms = strtol(value, &end, 10);
+    if (errno || *end || ms < 1000 || ms > 600000) {
+        dlog(1, "[%d] invalid TERMUX_VA_STALL_TIMEOUT_MS; using %d ms",
+             s->id, DEFAULT_STALL_MS);
+        return DEFAULT_STALL_MS;
+    }
+    return (int)ms;
+}
+
+static int64_t monotonic_ms(void)
+{
+    struct timespec ts = {0};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static ssize_t decoder_input_buffer(Session *s)
+{
+    int64_t started = monotonic_ms();
+    int64_t progress_at = started;
+    int64_t next_log = started + 5000;
+    unsigned int progress = __atomic_load_n(&s->output_progress, __ATOMIC_RELAXED);
+
+    while (running && !s->stop) {
+        /* POLLHUP denotes a fully closed peer, including one with unread
+         * queued input. Do not treat a write-half close as cancellation:
+         * shutdown(SHUT_WR) is the protocol's normal end-of-stream request. */
+        struct pollfd peer = {.fd = s->fd};
+        if (poll(&peer, 1, 0) > 0 &&
+            (peer.revents & (POLLHUP | POLLERR | POLLNVAL))) {
+            s->peer_gone = 1;
+            session_abort(s);
+            return -1;
+        }
+
+        ssize_t index = AMediaCodec_dequeueInputBuffer(s->codec, INPUT_POLL_US);
+        if (index >= 0)
+            return index;
+        if (index != AMEDIACODEC_INFO_TRY_AGAIN_LATER) {
+            dlog(1, "[%d] dequeueInputBuffer error: %zd", s->id, index);
+            session_abort(s);
+            return index;
+        }
+
+        int64_t now = monotonic_ms();
+        unsigned int current = __atomic_load_n(&s->output_progress, __ATOMIC_RELAXED);
+        if (current != progress) {
+            progress = current;
+            progress_at = now;
+        }
+        if (s->stop)
+            break;
+        if (now - progress_at >= s->stall_timeout_ms) {
+            unsigned busy = 0;
+            if (s->shm_base) {
+                for (int i = 0; i < SHM_SLOTS; i++)
+                    busy += __atomic_load_n(shm_slot_state(s, i), __ATOMIC_ACQUIRE) != 0;
+            }
+            dlog(1, "[%d] decoder stalled: no input buffer or output progress for %lld ms; "
+                    "SHM busy=%u/%d; releasing session",
+                 s->id, (long long)(now - progress_at), busy,
+                 s->shm_base ? SHM_SLOTS : 0);
+            session_abort(s);
+            return -1;
+        }
+        if (now >= next_log) {
+            dlog(1, "[%d] input buffers full (waited %lld ms, no output progress %lld ms)",
+                 s->id, (long long)(now - started), (long long)(now - progress_at));
+            next_log = now + 5000;
+        }
+    }
+    session_abort(s);
+    return -1;
 }
 
 /* Pool setup/teardown are defined later; the handshake path needs them. */
@@ -761,7 +862,7 @@ static void *input_thread(void *arg)
 
     if (!buf || !csd) {
         dlog(0, "[%d] input buffer allocation failed", s->id);
-        s->stop = 1;
+        session_abort(s);
         goto done;
     }
 
@@ -857,11 +958,13 @@ static void *input_thread(void *arg)
 
         if (sz > MAX_FRAME) {
             dlog(1, "[%d] illegal unit length: %u", s->id, sz);
-            break;
+            session_abort(s);
+            goto done;
         }
         if (recv_all(s->fd, buf, sz) < 0) {
             dlog(1, "[%d] reading unit data interrupted", s->id);
-            break;
+            session_abort(s);
+            goto done;
         }
         s->units_in++;
 
@@ -913,37 +1016,18 @@ static void *input_thread(void *arg)
          * the input buffers, after which "dequeue failed: -1" ended the
          * session and Chrome lost hardware decoding entirely.
          *
-         * Input-buffer exhaustion is BACKPRESSURE, not an error: the output
-         * thread returns frames and the buffers are recycled.  Wait it out;
-         * only a real error code gives up. */
-        ssize_t bi;
-        int bi_tries = 0;
-        for (;;) {
-            bi = AMediaCodec_dequeueInputBuffer(s->codec, INPUT_TIMEOUT_US);
-            if (bi >= 0)
-                break;
-            if (bi != AMEDIACODEC_INFO_TRY_AGAIN_LATER) {
-                dlog(1, "[%d] dequeueInputBuffer error: %zd", s->id, bi);
-                break;
-            }
-            if (s->stop)
-                break;
-            bi_tries++;
-            dlog(1, "[%d] input buffers full, retry #%d (wait %d ms)",
-                 s->id, bi_tries, INPUT_TIMEOUT_US / 1000);
-            if (bi_tries >= 12) {   /* 12 x 5s = 60s, enough for any sane backpressure */
-                dlog(1, "[%d] input buffers persistently unavailable, giving up", s->id);
-                break;
-            }
-        }
+         * Input-buffer exhaustion is BACKPRESSURE, not an error. Keep
+         * waiting while output buffers are being returned; cancel only
+         * after a complete interval without progress, or a peer close. */
+        ssize_t bi = decoder_input_buffer(s);
         if (bi < 0)
             goto done;   /* no buffer available: end the session, do not drop frames */
-        size_t cap;
+        size_t cap = 0;
         uint8_t *ib = AMediaCodec_getInputBuffer(s->codec, bi, &cap);
         if (!ib || cap < sz) {
             dlog(1, "[%d] unit exceeds input buffer capacity (%u > %zu)", s->id, sz, cap);
-            AMediaCodec_queueInputBuffer(s->codec, bi, 0, 0, 0, 0);
-            continue;
+            session_abort(s);
+            goto done;
         }
         memcpy(ib, buf, sz);
         /* PTS = index of this data unit (starting at 1, 1us steps).
@@ -963,8 +1047,13 @@ static void *input_thread(void *arg)
          * (105/150 frames out of order in an upstream measurement).
          *
          * Starting at 1: 0 is the "no PTS info" sentinel. */
-        AMediaCodec_queueInputBuffer(s->codec, bi, 0, sz,
-                                     (int64_t)s->vcl_in * PTS_UNIT_SCALE, 0);
+        media_status_t queued = AMediaCodec_queueInputBuffer(s->codec, bi, 0, sz,
+                                      (int64_t)s->vcl_in * PTS_UNIT_SCALE, 0);
+        if (queued != AMEDIA_OK) {
+            dlog(1, "[%d] queueInputBuffer failed: %d", s->id, queued);
+            session_abort(s);
+            goto done;
+        }
         s->vcl_in++;
     }
 
@@ -1564,7 +1653,8 @@ static void *output_thread(void *arg)
                          * reference 10/10 with no loss.  Counted separately,
                          * logged at debug level. */
                         s->frames_dropped_at_exit++;
-                        s->peer_gone = 1;
+                        if (!s->stop)
+                            s->peer_gone = 1;
                         s->stop = 1;
                     } else if (rc < 0) {
                         dlog(1, "[%d] frame send failed (transport error), ending session", s->id);
@@ -1575,7 +1665,13 @@ static void *output_thread(void *arg)
                     }
                 }
             }
-            AMediaCodec_releaseOutputBuffer(s->codec, oi, 0);
+            media_status_t released = AMediaCodec_releaseOutputBuffer(s->codec, oi, 0);
+            if (released != AMEDIA_OK) {
+                dlog(1, "[%d] releaseOutputBuffer failed: %d", s->id, released);
+                session_abort(s);
+                break;
+            }
+            __atomic_add_fetch(&s->output_progress, 1u, __ATOMIC_RELAXED);
             if (eos) {
                 /* EOS has two sources with very different handling:
                  *   1) drain request (drain_req > drain_done) - the session
@@ -1682,6 +1778,9 @@ static void *output_thread(void *arg)
             break;
         }
     }
+    /* Also covers unexpected MediaCodec errors and failed EOS delivery.
+     * The input worker may otherwise stay blocked in recv_all forever. */
+    session_abort(s);
     return NULL;
 }
 
@@ -2118,6 +2217,20 @@ static void *session_thread(void *arg)
         goto out_started;
     }
 
+    s->stall_timeout_ms = decoder_stall_timeout(s);
+    struct timeval send_timeout = {
+        .tv_sec = s->stall_timeout_ms / 1000,
+        .tv_usec = (s->stall_timeout_ms % 1000) * 1000,
+    };
+    /* A stalled receiver must not pin a codec output buffer and the input
+     * worker indefinitely. Never time out reads: an idle/paused client is
+     * allowed to keep its session without submitting new input. */
+    if (setsockopt(s->fd, SOL_SOCKET, SO_SNDTIMEO,
+                   &send_timeout, sizeof(send_timeout)) < 0) {
+        dlog(1, "[%d] cannot set decoder send timeout: %s", s->id, strerror(errno));
+        goto out_fd;
+    }
+
     fmt = AMediaFormat_new();
     if (!fmt) { dlog(0, "[%d] AMediaFormat_new failed", s->id); goto out_fd; }
     AMediaFormat_setString(fmt, TVA_MF_KEY_MIME, s->mime);
@@ -2202,9 +2315,9 @@ static void *session_thread(void *arg)
 
     pthread_t tin, tout;
     int have_in = (pthread_create(&tin, NULL, input_thread, s) == 0);
-    if (!have_in) { dlog(0, "[%d] cannot create input thread", s->id); s->stop = 1; }
+    if (!have_in) { dlog(0, "[%d] cannot create input thread", s->id); session_abort(s); }
     int have_out = (pthread_create(&tout, NULL, output_thread, s) == 0);
-    if (!have_out) { dlog(0, "[%d] cannot create output thread", s->id); s->stop = 1; }
+    if (!have_out) { dlog(0, "[%d] cannot create output thread", s->id); session_abort(s); }
 
     if (have_in)  pthread_join(tin, NULL);
     if (have_out) pthread_join(tout, NULL);
