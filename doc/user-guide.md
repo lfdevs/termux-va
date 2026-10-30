@@ -46,7 +46,7 @@ Actual support depends on the processor, application, video specifications, and 
 
 #### Basic environment variables
 
-To let Linux applications use Termux:VA for hardware video decoding or encoding, first set the following environment variables. You can add them to `/etc/environment` to make them global. If this causes problems with other applications, you can instead set them only for specific applications.
+To let Linux applications use Termux:VA for hardware video decoding or encoding, first set the following environment variables. We recommend declaring them only for applications that need them, such as by placing them at the beginning of the commands below, instead of adding them as global environment variables.
 
 - Snapdragon processors: `MESA_LOADER_DRIVER_OVERRIDE=kgsl LIBVA_DRIVER_NAME=termuxva TERMUX_VA_BRIDGE=1 TERMUX_VA_GPU_BACKEND=kgsl`
 - Non-Snapdragon processors: `MESA_LOADER_DRIVER_OVERRIDE=llvmpipe LIBVA_DRIVER_NAME=termuxva TERMUX_VA_BRIDGE=1 TERMUX_VA_GPU_BACKEND=sw`

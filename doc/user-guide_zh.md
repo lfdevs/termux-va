@@ -46,7 +46,7 @@ Termux:VA 实际的支持情况取决于具体的处理器、应用、视频规�
 
 #### 基础环境变量
 
-要让 Linux 应用通过 Termux:VA 进行硬件解码或编码，首先需要声明这些基础环境变量。你可以将它们加入 `/etc/environment` 作为全局环境变量。如果加入这些全局环境变量后其他应用出现问题，也可只为特定的应用声明。
+要让 Linux 应用通过 Termux:VA 进行硬件解码或编码，首先需要声明这些基础环境变量。建议只为需要的应用声明，如加在后面命令示例的开头，而不是加入全局环境变量。
 
 - 对于骁龙处理器：`MESA_LOADER_DRIVER_OVERRIDE=kgsl LIBVA_DRIVER_NAME=termuxva TERMUX_VA_BRIDGE=1 TERMUX_VA_GPU_BACKEND=kgsl`
 - 对于非骁龙处理器：`MESA_LOADER_DRIVER_OVERRIDE=llvmpipe LIBVA_DRIVER_NAME=termuxva TERMUX_VA_BRIDGE=1 TERMUX_VA_GPU_BACKEND=sw`
