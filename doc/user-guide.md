@@ -92,6 +92,9 @@ The following FFmpeg examples convert a video to HEVC at `1280x720` and a bitrat
 
 Currently, Termux:VA hardware video decoding and encoding in Chromium are available only on Snapdragon processors.
 
+> [!NOTE]
+> Currently, hardware video decoding with Termux:VA in Chromium under Termux:X11 suffers from severe frame flashbacks. Using Anland: Termux is recommended.
+
 1. Termux:X11
 
    Hardware video decoding works under Termux:X11; hardware video encoding is currently unavailable.

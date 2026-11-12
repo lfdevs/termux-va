@@ -92,6 +92,9 @@ Termux:VA 实际的支持情况取决于具体的处理器、应用、视频规�
 
 目前，通过 Termux:VA 在 Chromium 开启硬件视频解码和编码加速仅对骁龙处理器可用。
 
+> [!NOTE]
+> 目前在 Termux:X11 下，Chromium 使用 Termux:VA 进行硬件视频解码画面会有严重的画面闪回问题，建议在 Anland: Termux 下使用。
+
 1. Termux:X11
 
    Termux:X11 下硬件视频解码加速可用，硬件视频编码加速暂不可用。
