@@ -13,6 +13,7 @@
 - 相较于软件解码和编码，可在一定程度上降低 CPU 占用率。
 - 理论上支持 4K 60fps 乃至更高规格视频的硬件解码。
 - 支持 Android 10 及更高版本的系统。
+- 除了 Linux 容器，也支持 Termux native，详见[这篇讨论](https://github.com/lfdevs/termux-va/discussions/5)。
 
 ## 兼容性
 

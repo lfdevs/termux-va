@@ -13,6 +13,7 @@ Provide Android MediaCodec hardware video decoding and encoding to Linux contain
 - Hardware decoding and encoding can reduce CPU usage compared with software processing.
 - Hardware decoding of 4K 60 fps and higher-specification video may be possible, depending on the device.
 - Supports Android 10 and later.
+- In addition to Linux containers, Termux native is also supported. See [this discussion](https://github.com/lfdevs/termux-va/discussions/5) for details.
 
 ## Compatibility
 
